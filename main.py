@@ -17,7 +17,6 @@ NAVER_CLIENT_SECRET = os.environ.get('NAVER_CLIENT_SECRET', '')
 def get_realtime_keywords():
     try:
         url = "https://trends.google.com/trends/trendingsearches/daily/rss?geo=KR"
-        # 구글이 차단하지 않도록 일반 브라우저인 척(User-Agent) 위장합니다.
         req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
         response = urllib.request.urlopen(req)
         xml_data = response.read()
@@ -25,7 +24,6 @@ def get_realtime_keywords():
         root = ET.fromstring(xml_data)
         keywords = []
         
-        # XML 데이터에서 키워드(title)만 10개 추출
         for item in root.findall('.//channel/item'):
             title = item.find('title').text
             if title not in keywords:
@@ -35,10 +33,15 @@ def get_realtime_keywords():
         return keywords
     except Exception as e:
         print(f"키워드 추출 실패: {e}")
-        return ["날씨", "비트코인", "환율", "삼성전자", "넷플릭스"] # 실패 시 기본값
+        # 에러 발생 시를 대비해 예비 키워드를 10개로 넉넉히 채웠습니다.
+        return ["날씨", "비트코인", "환율", "삼성전자", "넷플릭스", "손흥민", "이재명", "아이유", "뉴진스", "GPT"]
 
 # 2. 네이버 데이터랩 API에 키워드를 보내서 데이터를 받아오는 함수
 def fetch_naver_trends(keyword_groups):
+    # 만약 물어볼 키워드가 없다면 네이버에 요청하지 않고 바로 빈 결과를 돌려줍니다.
+    if not keyword_groups: 
+        return {'results': []}
+        
     end_date = datetime.now().strftime('%Y-%m-%d')
     start_date = (datetime.now() - timedelta(days=3)).strftime('%Y-%m-%d')
     body = json.dumps({
@@ -63,10 +66,8 @@ def fetch_naver_trends(keyword_groups):
 @app.route('/trends', methods=['GET'])
 def get_trends():
     try:
-        # 실시간 키워드 자동 추출
         live_keywords = get_realtime_keywords()
         
-        # 네이버 API는 한 번에 5개까지만 비교 가능하므로 5개씩 2그룹으로 나눔
         group1 = [{"groupName": kw, "keywords": [kw]} for kw in live_keywords[:5]]
         group2 = [{"groupName": kw, "keywords": [kw]} for kw in live_keywords[5:10]]
         
@@ -75,7 +76,6 @@ def get_trends():
         
         all_results = result1.get('results', []) + result2.get('results', [])
         
-        # 검색량(ratio) 기준으로 내림차순 정렬
         results_sorted = sorted(
             all_results,
             key=lambda x: x['data'][-1]['ratio'] if x.get('data') else 0,
