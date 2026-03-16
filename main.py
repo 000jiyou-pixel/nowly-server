@@ -4,6 +4,7 @@ import urllib.request
 import urllib.error
 import json
 import os
+import re
 from datetime import datetime, timedelta
 
 app = Flask(__name__)
@@ -12,26 +13,29 @@ CORS(app)
 NAVER_CLIENT_ID = os.environ.get('NAVER_CLIENT_ID', '')
 NAVER_CLIENT_SECRET = os.environ.get('NAVER_CLIENT_SECRET', '')
 
-# 1. 구글 트렌드 우회해서 실시간 키워드 가져오는 함수 (수정됨 ⭐️)
+# 1. 시그널(signal.bz) 사이트에서 한국 실시간 검색어를 직접 뽑아오는 함수 (구글 버림 ⭐️)
 def get_realtime_keywords():
     try:
-        # 구글에 직접 안 가고, rss2json 이라는 우회 서비스를 통해 한국 구글 트렌드를 가져옵니다.
-        url = "https://api.rss2json.com/v1/api.json?rss_url=https%3A%2F%2Ftrends.google.com%2Ftrends%2Ftrendingsearches%2Fdaily%2Frss%3Fgeo%3DKR"
-        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        response = urllib.request.urlopen(req)
-        data = json.loads(response.read().decode('utf-8'))
+        url = "https://signal.bz/news"
+        # 일반 접속자인 척 위장
+        req = urllib.request.Request(url, headers={
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        })
+        response = urllib.request.urlopen(req, timeout=10)
+        html = response.read().decode('utf-8')
+        
+        # HTML 코드 속에서 'rank-text'라는 실시간 검색어 부분만 정규표현식으로 쏙쏙 뽑아냅니다.
+        keywords_raw = re.findall(r'class="rank-text">([^<]+)</span>', html)
         
         keywords = []
-        for item in data.get('items', []):
-            title = item.get('title')
-            if title and title not in keywords:
-                keywords.append(title)
+        for kw in keywords_raw:
+            if kw not in keywords:
+                keywords.append(kw)
             if len(keywords) >= 10:
                 break
                 
-        # 만약 우회 서비스에서도 못 가져왔다면 에러를 발생시킵니다.
         if not keywords:
-            raise Exception("키워드를 찾을 수 없음")
+            raise Exception("시그널 사이트에서 키워드를 찾지 못했습니다.")
             
         return keywords
         
@@ -39,7 +43,7 @@ def get_realtime_keywords():
         print(f"키워드 추출 실패: {e}")
         return ["날씨", "비트코인", "환율", "삼성전자", "넷플릭스", "손흥민", "이재명", "아이유", "뉴진스", "GPT"]
 
-# 2. 네이버 데이터랩 API
+# 2. 네이버 데이터랩 API로 점수 매기기
 def fetch_naver_trends(keyword_groups):
     if not keyword_groups: 
         return {'results': []}
@@ -52,18 +56,23 @@ def fetch_naver_trends(keyword_groups):
         "timeUnit": "date",
         "keywordGroups": keyword_groups
     }).encode('utf-8')
-    req = urllib.request.Request(
-        "https://openapi.naver.com/v1/datalab/search",
-        data=body,
-        method='POST',
-        headers={
-            'X-Naver-Client-Id': NAVER_CLIENT_ID,
-            'X-Naver-Client-Secret': NAVER_CLIENT_SECRET,
-            'Content-Type': 'application/json'
-        }
-    )
-    response = urllib.request.urlopen(req, timeout=10)
-    return json.loads(response.read().decode('utf-8'))
+    
+    try:
+        req = urllib.request.Request(
+            "https://openapi.naver.com/v1/datalab/search",
+            data=body,
+            method='POST',
+            headers={
+                'X-Naver-Client-Id': NAVER_CLIENT_ID,
+                'X-Naver-Client-Secret': NAVER_CLIENT_SECRET,
+                'Content-Type': 'application/json'
+            }
+        )
+        response = urllib.request.urlopen(req, timeout=10)
+        return json.loads(response.read().decode('utf-8'))
+    except Exception as e:
+        print(f"네이버 API 에러: {e}")
+        return {'results': []}
 
 @app.route('/trends', methods=['GET'])
 def get_trends():
@@ -92,7 +101,7 @@ def get_trends():
                 'keyword': item['title'],
                 'change': 'new' if i < 2 else 'up' if i < 5 else 'same',
                 'heat': min(int(ratio), 100),
-                'sources': ['구글/네이버'],
+                'sources': ['실시간검색어'],
             })
             
         return jsonify({'success': True, 'data': trends, 'source': 'auto-trend'})
