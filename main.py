@@ -2,7 +2,6 @@ from flask import Flask, jsonify
 from flask_cors import CORS
 import urllib.request
 import urllib.error
-import xml.etree.ElementTree as ET
 import json
 import os
 from datetime import datetime, timedelta
@@ -13,32 +12,35 @@ CORS(app)
 NAVER_CLIENT_ID = os.environ.get('NAVER_CLIENT_ID', '')
 NAVER_CLIENT_SECRET = os.environ.get('NAVER_CLIENT_SECRET', '')
 
-# 1. 구글 트렌드에서 실시간 한국 키워드 10개를 자동으로 가져오는 함수
+# 1. 구글 트렌드 우회해서 실시간 키워드 가져오는 함수 (수정됨 ⭐️)
 def get_realtime_keywords():
     try:
-        url = "https://trends.google.com/trends/trendingsearches/daily/rss?geo=KR"
+        # 구글에 직접 안 가고, rss2json 이라는 우회 서비스를 통해 한국 구글 트렌드를 가져옵니다.
+        url = "https://api.rss2json.com/v1/api.json?rss_url=https%3A%2F%2Ftrends.google.com%2Ftrends%2Ftrendingsearches%2Fdaily%2Frss%3Fgeo%3DKR"
         req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
         response = urllib.request.urlopen(req)
-        xml_data = response.read()
+        data = json.loads(response.read().decode('utf-8'))
         
-        root = ET.fromstring(xml_data)
         keywords = []
-        
-        for item in root.findall('.//channel/item'):
-            title = item.find('title').text
-            if title not in keywords:
+        for item in data.get('items', []):
+            title = item.get('title')
+            if title and title not in keywords:
                 keywords.append(title)
             if len(keywords) >= 10:
                 break
+                
+        # 만약 우회 서비스에서도 못 가져왔다면 에러를 발생시킵니다.
+        if not keywords:
+            raise Exception("키워드를 찾을 수 없음")
+            
         return keywords
+        
     except Exception as e:
         print(f"키워드 추출 실패: {e}")
-        # 에러 발생 시를 대비해 예비 키워드를 10개로 넉넉히 채웠습니다.
         return ["날씨", "비트코인", "환율", "삼성전자", "넷플릭스", "손흥민", "이재명", "아이유", "뉴진스", "GPT"]
 
-# 2. 네이버 데이터랩 API에 키워드를 보내서 데이터를 받아오는 함수
+# 2. 네이버 데이터랩 API
 def fetch_naver_trends(keyword_groups):
-    # 만약 물어볼 키워드가 없다면 네이버에 요청하지 않고 바로 빈 결과를 돌려줍니다.
     if not keyword_groups: 
         return {'results': []}
         
