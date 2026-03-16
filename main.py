@@ -12,46 +12,57 @@ CORS(app)
 NAVER_CLIENT_ID = os.environ.get('NAVER_CLIENT_ID', '')
 NAVER_CLIENT_SECRET = os.environ.get('NAVER_CLIENT_SECRET', '')
 
+def fetch_naver_trends(keyword_groups):
+    end_date = datetime.now().strftime('%Y-%m-%d')
+    start_date = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
+
+    body = json.dumps({
+        "startDate": start_date,
+        "endDate": end_date,
+        "timeUnit": "date",
+        "keywordGroups": keyword_groups
+    }).encode('utf-8')
+
+    req = urllib.request.Request(
+        "https://openapi.naver.com/v1/datalab/search",
+        data=body,
+        method='POST',
+        headers={
+            'X-Naver-Client-Id': NAVER_CLIENT_ID,
+            'X-Naver-Client-Secret': NAVER_CLIENT_SECRET,
+            'Content-Type': 'application/json'
+        }
+    )
+    response = urllib.request.urlopen(req, timeout=10)
+    return json.loads(response.read().decode('utf-8'))
+
 @app.route('/trends', methods=['GET'])
 def get_trends():
     try:
-        end_date = datetime.now().strftime('%Y-%m-%d')
-        start_date = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
+        # 1차 요청 (5개)
+        group1 = [
+            {"groupName": "손흥민", "keywords": ["손흥민"]},
+            {"groupName": "이재명", "keywords": ["이재명"]},
+            {"groupName": "비트코인", "keywords": ["비트코인"]},
+            {"groupName": "아이유", "keywords": ["아이유"]},
+            {"groupName": "뉴진스", "keywords": ["뉴진스"]},
+        ]
+        # 2차 요청 (5개)
+        group2 = [
+            {"groupName": "날씨", "keywords": ["날씨"]},
+            {"groupName": "삼성전자", "keywords": ["삼성전자"]},
+            {"groupName": "환율", "keywords": ["환율"]},
+            {"groupName": "GPT", "keywords": ["GPT"]},
+            {"groupName": "넷플릭스", "keywords": ["넷플릭스"]},
+        ]
 
-        body = json.dumps({
-            "startDate": start_date,
-            "endDate": end_date,
-            "timeUnit": "date",
-            "keywordGroups": [
-                {"groupName": "손흥민", "keywords": ["손흥민"]},
-                {"groupName": "이재명", "keywords": ["이재명"]},
-                {"groupName": "비트코인", "keywords": ["비트코인"]},
-                {"groupName": "아이유", "keywords": ["아이유"]},
-                {"groupName": "뉴진스", "keywords": ["뉴진스"]},
-                {"groupName": "날씨", "keywords": ["날씨"]},
-                {"groupName": "삼성전자", "keywords": ["삼성전자"]},
-                {"groupName": "환율", "keywords": ["환율"]},
-                {"groupName": "GPT", "keywords": ["GPT"]},
-                {"groupName": "넷플릭스", "keywords": ["넷플릭스"]}
-            ]
-        }).encode('utf-8')
+        result1 = fetch_naver_trends(group1)
+        result2 = fetch_naver_trends(group2)
 
-        req = urllib.request.Request(
-            "https://openapi.naver.com/v1/datalab/search",
-            data=body,
-            method='POST',
-            headers={
-                'X-Naver-Client-Id': NAVER_CLIENT_ID,
-                'X-Naver-Client-Secret': NAVER_CLIENT_SECRET,
-                'Content-Type': 'application/json'
-            }
-        )
-
-        response = urllib.request.urlopen(req, timeout=10)
-        result = json.loads(response.read().decode('utf-8'))
+        all_results = result1.get('results', []) + result2.get('results', [])
 
         results_sorted = sorted(
-            result.get('results', []),
+            all_results,
             key=lambda x: x['data'][-1]['ratio'] if x.get('data') else 0,
             reverse=True
         )
