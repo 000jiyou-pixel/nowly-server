@@ -189,3 +189,20 @@ def health():
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8080)
+@app.route('/debug-naver')
+def debug_naver():
+    import urllib.request, urllib.parse, json, os
+    client_id = os.environ.get('NAVER_CLIENT_ID', 'NOT_SET')
+    client_secret = os.environ.get('NAVER_CLIENT_SECRET', 'NOT_SET')
+    
+    try:
+        url = f"https://openapi.naver.com/v1/search/news.json?query={urllib.parse.quote('오늘')}&display=5&sort=date"
+        req = urllib.request.Request(url, headers={
+            'X-Naver-Client-Id': client_id,
+            'X-Naver-Client-Secret': client_secret,
+        })
+        response = urllib.request.urlopen(req, timeout=10)
+        data = json.loads(response.read().decode('utf-8'))
+        return jsonify({"success": True, "client_id_set": client_id != 'NOT_SET', "items_count": len(data.get('items', []))})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e), "client_id_set": client_id != 'NOT_SET'})
