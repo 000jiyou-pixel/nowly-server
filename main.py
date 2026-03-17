@@ -12,7 +12,6 @@ CORS(app)
 
 NAVER_CLIENT_ID = os.environ.get('NAVER_CLIENT_ID', '')
 NAVER_CLIENT_SECRET = os.environ.get('NAVER_CLIENT_SECRET', '')
-# 유튜브 API 키 환경변수 추가
 YOUTUBE_API_KEY = os.environ.get('YOUTUBE_API_KEY', '')
 
 # 1. 시그널(signal.bz) 사이트에서 한국 실시간 검색어를 직접 뽑아오는 함수
@@ -74,14 +73,13 @@ def fetch_naver_trends(keyword_groups):
         print(f"네이버 API 에러: {e}")
         return {'results': []}
 
-# 3. 유튜브 Hype(인기 급상승) 동영상 리스트 가져오기 (새로 추가됨 ⭐️)
+# 3. 유튜브 인기 급상승 동영상 리스트 가져오기
 def get_youtube_hype_trends():
     if not YOUTUBE_API_KEY:
         print("유튜브 API 키가 없습니다.")
         return []
         
-    # 한국(KR) 지역의 유튜브 인기 급상승(mostPopular) 데이터 요청
-    url = f"https://www.googleapis.com/youtube/v3/videos?part=snippet,statistics&chart=mostPopular&regionCode=KR&maxResults=5&key={YOUTUBE_API_KEY}"
+    url = f"https://www.googleapis.com/youtube/v3/videos?part=snippet,statistics&chart=mostPopular&regionCode=KR&maxResults=10&key={YOUTUBE_API_KEY}"
     
     try:
         req = urllib.request.Request(url)
@@ -90,17 +88,32 @@ def get_youtube_hype_trends():
         
         hype_videos = []
         for item in data.get('items', []):
+            video_id = item['id']
+            snippet = item['snippet']
+            statistics = item['statistics']
+            
+            # 썸네일: maxres > high > medium > default 순으로 시도
+            thumbnails = snippet.get('thumbnails', {})
+            thumbnail_url = (
+                thumbnails.get('maxres', {}).get('url') or
+                thumbnails.get('high', {}).get('url') or
+                thumbnails.get('medium', {}).get('url') or
+                f"https://img.youtube.com/vi/{video_id}/mqdefault.jpg"
+            )
+            
             video_info = {
-                'platform': 'youtube',
-                'title': item['snippet']['title'],
-                'channel': item['snippet']['channelTitle'],
-                'views': item['statistics'].get('viewCount', '0'),
-                'thumbnail': item['snippet']['thumbnails']['medium']['url'] if 'medium' in item['snippet']['thumbnails'] else '',
-                'link': f"https://www.youtube.com/watch?v={item['id']}"
+                'videoId': video_id,                                          # 프론트엔드용 필드명
+                'title': snippet.get('title', ''),
+                'channelTitle': snippet.get('channelTitle', ''),              # 프론트엔드용 필드명
+                'viewCount': int(statistics.get('viewCount', 0)),             # 프론트엔드용 필드명
+                'thumbnail': thumbnail_url,
+                'url': f"https://www.youtube.com/watch?v={video_id}",        # 프론트엔드용 필드명
             }
             hype_videos.append(video_info)
             
+        print(f"유튜브 영상 {len(hype_videos)}개 수집 완료")
         return hype_videos
+
     except Exception as e:
         print(f"유튜브 API 에러: {e}")
         return []
@@ -134,18 +147,18 @@ def get_trends():
                 'sources': ['실시간검색어'],
             })
             
-        # 유튜브 Hype 데이터 수집 추가
+        # 유튜브 데이터 수집
         youtube_data = get_youtube_hype_trends()
             
-        # 기존 네이버 데이터(trends)와 유튜브 데이터(youtube_data)를 한 번에 프론트엔드로 발송
         return jsonify({
             'success': True, 
             'data': trends, 
-            'youtube': youtube_data, 
+            'youtube': youtube_data,
             'source': 'auto-trend'
         })
         
     except Exception as e:
+        print(f"전체 에러: {e}")
         return jsonify({'success': False, 'error': str(e)})
 
 @app.route('/health', methods=['GET'])
