@@ -14,39 +14,55 @@ NAVER_CLIENT_ID = os.environ.get('NAVER_CLIENT_ID', '')
 NAVER_CLIENT_SECRET = os.environ.get('NAVER_CLIENT_SECRET', '')
 YOUTUBE_API_KEY = os.environ.get('YOUTUBE_API_KEY', '')
 
-# 1. 시그널(signal.bz) 사이트에서 한국 실시간 검색어를 직접 뽑아오는 함수
+# 고정 인기 키워드 (네이버 API로 점수 매기기용)
+DEFAULT_KEYWORDS = ["환율", "날씨", "삼성전자", "이재명", "손흥민", "GPT", "아이유", "뉴진스", "비트코인", "넷플릭스"]
+
+# 1. 네이버 실시간 급상승 검색어 가져오기
 def get_realtime_keywords():
     try:
-        url = "https://signal.bz/news"
-        req = urllib.request.Request(url, headers={
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-        })
-        response = urllib.request.urlopen(req, timeout=10)
-        html = response.read().decode('utf-8')
+        # 네이버 검색 API로 실시간 인기 검색어 뉴스 기반으로 추출
+        keywords_to_try = [
+            "실시간검색어", "급상승", "오늘뉴스", "실시간뉴스"
+        ]
         
-        keywords_raw = re.findall(r'class="rank-text">([^<]+)</span>', html)
-        
-        keywords = []
-        for kw in keywords_raw:
-            if kw not in keywords:
-                keywords.append(kw)
-            if len(keywords) >= 10:
-                break
-                
-        if not keywords:
-            raise Exception("시그널 사이트에서 키워드를 찾지 못했습니다.")
+        found_keywords = []
+        for q in keywords_to_try:
+            url = f"https://openapi.naver.com/v1/search/news.json?query={urllib.parse.quote(q)}&display=20&sort=date"
+            req = urllib.request.Request(url, headers={
+                'X-Naver-Client-Id': NAVER_CLIENT_ID,
+                'X-Naver-Client-Secret': NAVER_CLIENT_SECRET,
+            })
+            response = urllib.request.urlopen(req, timeout=10)
+            data = json.loads(response.read().decode('utf-8'))
             
-        return keywords
+            for item in data.get('items', []):
+                title = re.sub(r'<[^>]+>', '', item.get('title', ''))
+                words = re.findall(r'[가-힣]{2,6}', title)
+                for w in words:
+                    if w not in found_keywords and w not in ['기자', '뉴스', '속보', '오늘', '지금', '최근', '관련', '발표', '대한', '이후', '이번', '지난']:
+                        found_keywords.append(w)
+                if len(found_keywords) >= 10:
+                    break
+            if len(found_keywords) >= 10:
+                break
+
+        if len(found_keywords) >= 5:
+            return found_keywords[:10]
         
+        return DEFAULT_KEYWORDS
+
     except Exception as e:
         print(f"키워드 추출 실패: {e}")
-        return ["날씨", "비트코인", "환율", "삼성전자", "넷플릭스", "손흥민", "이재명", "아이유", "뉴진스", "GPT"]
+        return DEFAULT_KEYWORDS
+
+# urllib.parse import 추가
+import urllib.parse
 
 # 2. 네이버 데이터랩 API로 점수 매기기
 def fetch_naver_trends(keyword_groups):
-    if not keyword_groups: 
+    if not keyword_groups:
         return {'results': []}
-        
+
     end_date = datetime.now().strftime('%Y-%m-%d')
     start_date = (datetime.now() - timedelta(days=3)).strftime('%Y-%m-%d')
     body = json.dumps({
@@ -55,7 +71,7 @@ def fetch_naver_trends(keyword_groups):
         "timeUnit": "date",
         "keywordGroups": keyword_groups
     }).encode('utf-8')
-    
+
     try:
         req = urllib.request.Request(
             "https://openapi.naver.com/v1/datalab/search",
@@ -86,7 +102,6 @@ def get_youtube_hype_trends():
         response = urllib.request.urlopen(req, timeout=10)
         data = json.loads(response.read().decode('utf-8'))
 
-        # 유튜브 API가 에러를 반환한 경우
         if 'error' in data:
             error_msg = data['error'].get('message', '알 수 없는 에러')
             print(f"유튜브 API 에러 응답: {error_msg}")
@@ -133,17 +148,17 @@ def get_trends():
         live_keywords = get_realtime_keywords()
         group1 = [{"groupName": kw, "keywords": [kw]} for kw in live_keywords[:5]]
         group2 = [{"groupName": kw, "keywords": [kw]} for kw in live_keywords[5:10]]
-        
+
         result1 = fetch_naver_trends(group1)
         result2 = fetch_naver_trends(group2)
         all_results = result1.get('results', []) + result2.get('results', [])
-        
+
         results_sorted = sorted(
             all_results,
             key=lambda x: x['data'][-1]['ratio'] if x.get('data') else 0,
             reverse=True
         )
-        
+
         trends = []
         for i, item in enumerate(results_sorted):
             ratio = item['data'][-1]['ratio'] if item.get('data') else 0
