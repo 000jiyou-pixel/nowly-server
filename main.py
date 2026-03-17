@@ -12,19 +12,19 @@ CORS(app)
 
 NAVER_CLIENT_ID = os.environ.get('NAVER_CLIENT_ID', '')
 NAVER_CLIENT_SECRET = os.environ.get('NAVER_CLIENT_SECRET', '')
+# 유튜브 API 키 환경변수 추가
+YOUTUBE_API_KEY = os.environ.get('YOUTUBE_API_KEY', '')
 
-# 1. 시그널(signal.bz) 사이트에서 한국 실시간 검색어를 직접 뽑아오는 함수 (구글 버림 ⭐️)
+# 1. 시그널(signal.bz) 사이트에서 한국 실시간 검색어를 직접 뽑아오는 함수
 def get_realtime_keywords():
     try:
         url = "https://signal.bz/news"
-        # 일반 접속자인 척 위장
         req = urllib.request.Request(url, headers={
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
         })
         response = urllib.request.urlopen(req, timeout=10)
         html = response.read().decode('utf-8')
         
-        # HTML 코드 속에서 'rank-text'라는 실시간 검색어 부분만 정규표현식으로 쏙쏙 뽑아냅니다.
         keywords_raw = re.findall(r'class="rank-text">([^<]+)</span>', html)
         
         keywords = []
@@ -74,17 +74,47 @@ def fetch_naver_trends(keyword_groups):
         print(f"네이버 API 에러: {e}")
         return {'results': []}
 
+# 3. 유튜브 Hype(인기 급상승) 동영상 리스트 가져오기 (새로 추가됨 ⭐️)
+def get_youtube_hype_trends():
+    if not YOUTUBE_API_KEY:
+        print("유튜브 API 키가 없습니다.")
+        return []
+        
+    # 한국(KR) 지역의 유튜브 인기 급상승(mostPopular) 데이터 요청
+    url = f"https://www.googleapis.com/youtube/v3/videos?part=snippet,statistics&chart=mostPopular&regionCode=KR&maxResults=5&key={YOUTUBE_API_KEY}"
+    
+    try:
+        req = urllib.request.Request(url)
+        response = urllib.request.urlopen(req, timeout=10)
+        data = json.loads(response.read().decode('utf-8'))
+        
+        hype_videos = []
+        for item in data.get('items', []):
+            video_info = {
+                'platform': 'youtube',
+                'title': item['snippet']['title'],
+                'channel': item['snippet']['channelTitle'],
+                'views': item['statistics'].get('viewCount', '0'),
+                'thumbnail': item['snippet']['thumbnails']['medium']['url'] if 'medium' in item['snippet']['thumbnails'] else '',
+                'link': f"https://www.youtube.com/watch?v={item['id']}"
+            }
+            hype_videos.append(video_info)
+            
+        return hype_videos
+    except Exception as e:
+        print(f"유튜브 API 에러: {e}")
+        return []
+
 @app.route('/trends', methods=['GET'])
 def get_trends():
     try:
+        # 네이버 트렌드 데이터 수집
         live_keywords = get_realtime_keywords()
-        
         group1 = [{"groupName": kw, "keywords": [kw]} for kw in live_keywords[:5]]
         group2 = [{"groupName": kw, "keywords": [kw]} for kw in live_keywords[5:10]]
         
         result1 = fetch_naver_trends(group1)
         result2 = fetch_naver_trends(group2)
-        
         all_results = result1.get('results', []) + result2.get('results', [])
         
         results_sorted = sorted(
@@ -104,7 +134,16 @@ def get_trends():
                 'sources': ['실시간검색어'],
             })
             
-        return jsonify({'success': True, 'data': trends, 'source': 'auto-trend'})
+        # 유튜브 Hype 데이터 수집 추가
+        youtube_data = get_youtube_hype_trends()
+            
+        # 기존 네이버 데이터(trends)와 유튜브 데이터(youtube_data)를 한 번에 프론트엔드로 발송
+        return jsonify({
+            'success': True, 
+            'data': trends, 
+            'youtube': youtube_data, 
+            'source': 'auto-trend'
+        })
         
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
