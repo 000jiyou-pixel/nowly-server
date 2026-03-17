@@ -77,22 +77,27 @@ def fetch_naver_trends(keyword_groups):
 def get_youtube_hype_trends():
     if not YOUTUBE_API_KEY:
         print("유튜브 API 키가 없습니다.")
-        return []
-        
+        return [{"error": "YOUTUBE_API_KEY 환경변수 없음"}]
+
     url = f"https://www.googleapis.com/youtube/v3/videos?part=snippet,statistics&chart=mostPopular&regionCode=KR&maxResults=10&key={YOUTUBE_API_KEY}"
-    
+
     try:
         req = urllib.request.Request(url)
         response = urllib.request.urlopen(req, timeout=10)
         data = json.loads(response.read().decode('utf-8'))
-        
+
+        # 유튜브 API가 에러를 반환한 경우
+        if 'error' in data:
+            error_msg = data['error'].get('message', '알 수 없는 에러')
+            print(f"유튜브 API 에러 응답: {error_msg}")
+            return [{"error": error_msg}]
+
         hype_videos = []
         for item in data.get('items', []):
             video_id = item['id']
             snippet = item['snippet']
             statistics = item['statistics']
-            
-            # 썸네일: maxres > high > medium > default 순으로 시도
+
             thumbnails = snippet.get('thumbnails', {})
             thumbnail_url = (
                 thumbnails.get('maxres', {}).get('url') or
@@ -100,28 +105,31 @@ def get_youtube_hype_trends():
                 thumbnails.get('medium', {}).get('url') or
                 f"https://img.youtube.com/vi/{video_id}/mqdefault.jpg"
             )
-            
+
             video_info = {
-                'videoId': video_id,                                          # 프론트엔드용 필드명
+                'videoId': video_id,
                 'title': snippet.get('title', ''),
-                'channelTitle': snippet.get('channelTitle', ''),              # 프론트엔드용 필드명
-                'viewCount': int(statistics.get('viewCount', 0)),             # 프론트엔드용 필드명
+                'channelTitle': snippet.get('channelTitle', ''),
+                'viewCount': int(statistics.get('viewCount', 0)),
                 'thumbnail': thumbnail_url,
-                'url': f"https://www.youtube.com/watch?v={video_id}",        # 프론트엔드용 필드명
+                'url': f"https://www.youtube.com/watch?v={video_id}",
             }
             hype_videos.append(video_info)
-            
+
         print(f"유튜브 영상 {len(hype_videos)}개 수집 완료")
         return hype_videos
 
+    except urllib.error.HTTPError as e:
+        error_body = e.read().decode('utf-8')
+        print(f"유튜브 HTTP 에러: {e.code} - {error_body}")
+        return [{"error": f"HTTP {e.code}: {error_body}"}]
     except Exception as e:
         print(f"유튜브 API 에러: {e}")
-        return []
+        return [{"error": str(e)}]
 
 @app.route('/trends', methods=['GET'])
 def get_trends():
     try:
-        # 네이버 트렌드 데이터 수집
         live_keywords = get_realtime_keywords()
         group1 = [{"groupName": kw, "keywords": [kw]} for kw in live_keywords[:5]]
         group2 = [{"groupName": kw, "keywords": [kw]} for kw in live_keywords[5:10]]
@@ -146,17 +154,16 @@ def get_trends():
                 'heat': min(int(ratio), 100),
                 'sources': ['실시간검색어'],
             })
-            
-        # 유튜브 데이터 수집
+
         youtube_data = get_youtube_hype_trends()
-            
+
         return jsonify({
-            'success': True, 
-            'data': trends, 
+            'success': True,
+            'data': trends,
             'youtube': youtube_data,
             'source': 'auto-trend'
         })
-        
+
     except Exception as e:
         print(f"전체 에러: {e}")
         return jsonify({'success': False, 'error': str(e)})
