@@ -6,6 +6,7 @@ import urllib.parse
 import json
 import os
 import re
+import xml.etree.ElementTree as ET  # 구글 트렌드 RSS 파싱용 추가
 from datetime import datetime, timedelta
 
 app = Flask(__name__)
@@ -40,7 +41,7 @@ def get_realtime_keywords():
                 break
         return found_keywords[:10] if len(found_keywords) >= 5 else DEFAULT_KEYWORDS
     except Exception as e:
-        print(f"키워드 추출 실패: {e}")
+        print(f"키워 추출 실패: {e}")
         return DEFAULT_KEYWORDS
 
 def fetch_naver_trends(keyword_groups):
@@ -107,6 +108,38 @@ def get_youtube_hype_trends():
     except Exception as e:
         return [{"error": str(e)}]
 
+# --- 새롭게 추가된 구글 트렌드 함수 ---
+def get_google_trends():
+    url = "https://trends.google.com/trends/trendingsearches/daily/rss?geo=KR"
+    try:
+        req = urllib.request.Request(url, headers={
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        })
+        response = urllib.request.urlopen(req, timeout=10)
+        xml_data = response.read()
+        root = ET.fromstring(xml_data)
+        
+        trends = []
+        for i, item in enumerate(root.findall('.//item')):
+            if i >= 10:
+                break
+            title = item.find('title').text
+            traffic_node = item.find('{https://trends.google.com/trends/trendingsearches/daily}approx_traffic')
+            traffic = traffic_node.text if traffic_node is not None else "N/A"
+            link = item.find('link').text
+            
+            trends.append({
+                'rank': i + 1,
+                'keyword': title,
+                'traffic': traffic,
+                'url': link
+            })
+        return trends
+    except Exception as e:
+        print(f"구글 트렌드 RSS 에러: {e}")
+        return []
+# ----------------------------------
+
 @app.route('/trends', methods=['GET'])
 def get_trends():
     try:
@@ -131,11 +164,15 @@ def get_trends():
                 'heat': min(int(ratio), 100),
                 'sources': ['실시간검색어'],
             })
+        
         youtube_data = get_youtube_hype_trends()
+        google_data = get_google_trends() # 구글 데이터 가져오기 추가
+        
         return jsonify({
             'success': True,
             'data': trends,
             'youtube': youtube_data,
+            'google': google_data, # 응답 JSON에 구글 트렌드 추가
             'source': 'auto-trend'
         })
     except Exception as e:
@@ -161,6 +198,13 @@ def debug_naver():
         return jsonify({"success": True, "client_id_set": client_id != 'NOT_SET', "items_count": len(data.get('items', []))})
     except Exception as e:
         return jsonify({"success": False, "error": str(e), "client_id_set": client_id != 'NOT_SET'})
+
+# --- 구글 트렌드 전용 디버깅 라우트 추가 ---
+@app.route('/debug-google')
+def debug_google():
+    data = get_google_trends()
+    return jsonify({"success": True, "data": data})
+# ------------------------------------------
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8080)
