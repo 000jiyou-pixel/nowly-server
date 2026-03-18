@@ -6,7 +6,7 @@ import urllib.parse
 import json
 import os
 import re
-import xml.etree.ElementTree as ET  # 구글 트렌드 RSS 파싱용 추가
+import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 
 app = Flask(__name__)
@@ -41,7 +41,7 @@ def get_realtime_keywords():
                 break
         return found_keywords[:10] if len(found_keywords) >= 5 else DEFAULT_KEYWORDS
     except Exception as e:
-        print(f"키워 추출 실패: {e}")
+        print(f"키워드 추출 실패: {e}")
         return DEFAULT_KEYWORDS
 
 def fetch_naver_trends(keyword_groups):
@@ -166,13 +166,13 @@ def get_trends():
             })
         
         youtube_data = get_youtube_hype_trends()
-        google_data = get_google_trends() # 구글 데이터 가져오기 추가
+        google_data = get_google_trends()
         
         return jsonify({
             'success': True,
             'data': trends,
             'youtube': youtube_data,
-            'google': google_data, # 응답 JSON에 구글 트렌드 추가
+            'google': google_data,
             'source': 'auto-trend'
         })
     except Exception as e:
@@ -199,12 +199,12 @@ def debug_naver():
     except Exception as e:
         return jsonify({"success": False, "error": str(e), "client_id_set": client_id != 'NOT_SET'})
 
-# --- 구글 트렌드 전용 디버깅 라우트 추가 ---
+# --- 구글 트렌드 전용 디버깅 라우트 ---
 @app.route('/debug-google')
 def debug_google():
     data = get_google_trends()
     return jsonify({"success": True, "data": data})
-# ------------------------------------------
+# ------------------------------------
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8080)
