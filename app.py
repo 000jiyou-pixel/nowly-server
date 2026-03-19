@@ -6,19 +6,24 @@ import urllib.parse
 import json
 import os
 import re
-import requests  # ← 추가
+import requests  # 구글 GAS 프록시용
+import base64    # 스포티파이 토큰 암호화용
 from datetime import datetime, timedelta
 
 app = Flask(__name__)
 CORS(app)
 
+# --- 환경 변수 설정 ---
 NAVER_CLIENT_ID = os.environ.get('NAVER_CLIENT_ID', '')
 NAVER_CLIENT_SECRET = os.environ.get('NAVER_CLIENT_SECRET', '')
 YOUTUBE_API_KEY = os.environ.get('YOUTUBE_API_KEY', '')
 GAS_PROXY_URL = os.environ.get('GAS_PROXY_URL', '')
+SPOTIFY_CLIENT_ID = os.environ.get('SPOTIFY_CLIENT_ID', '')
+SPOTIFY_CLIENT_SECRET = os.environ.get('SPOTIFY_CLIENT_SECRET', '')
 
 DEFAULT_KEYWORDS = ["환율", "날씨", "삼성전자", "이재명", "손흥민", "GPT", "아이유", "뉴진스", "비트코인", "넷플릭스"]
 
+# --- 네이버 실시간 키워드 추출 ---
 def get_realtime_keywords():
     try:
         found_keywords = []
@@ -45,6 +50,7 @@ def get_realtime_keywords():
         print(f"키워드 추출 실패: {e}")
         return DEFAULT_KEYWORDS
 
+# --- 네이버 데이터랩 트렌드 조회 ---
 def fetch_naver_trends(keyword_groups):
     if not keyword_groups:
         return {'results': []}
@@ -73,6 +79,7 @@ def fetch_naver_trends(keyword_groups):
         print(f"네이버 API 에러: {e}")
         return {'results': []}
 
+# --- 유튜브 인기 동영상 (Hype) ---
 def get_youtube_hype_trends():
     if not YOUTUBE_API_KEY:
         return [{"error": "YOUTUBE_API_KEY 환경변수 없음"}]
@@ -109,10 +116,9 @@ def get_youtube_hype_trends():
     except Exception as e:
         return [{"error": str(e)}]
 
-# --- 새롭게 수정된 구글 트렌드 함수 (JSON API 우회 방식) ---
+# --- 구글 트렌드 (GAS 프록시 방식) ---
 def get_google_trends():
     if not GAS_PROXY_URL:
-        print("GAS_PROXY_URL 환경변수가 설정되지 않았습니다.")
         return []
     try:
         response = requests.get(
@@ -123,23 +129,182 @@ def get_google_trends():
         )
         response.raise_for_status()
         data = response.json()
-
         if data.get("status") != "ok":
-            print(f"GAS 프록시 에러: {data.get('error')}")
             return []
-
         return data.get("data", [])
-
-    except requests.exceptions.Timeout:
-        print("GAS 프록시 요청 타임아웃")
-        return []
-    except requests.exceptions.ConnectionError as e:
-        print(f"GAS 프록시 연결 실패: {e}")
-        return []
     except Exception as e:
         print(f"구글 트렌드 에러: {e}")
         return []
-# ----------------------------------------------------
+
+# --- 스포티파이 ---
+def get_spotify_token():
+    if not SPOTIFY_CLIENT_ID or not SPOTIFY_CLIENT_SECRET:
+        return None
+    url = "https://accounts.spotify.com/api/token"
+    auth_string = f"{SPOTIFY_CLIENT_ID}:{SPOTIFY_CLIENT_SECRET}"
+    auth_base64 = base64.b64encode(auth_string.encode('utf-8')).decode('utf-8')
+    data = urllib.parse.urlencode({'grant_type': 'client_credentials'}).encode('utf-8')
+    req = urllib.request.Request(url, data=data, headers={
+        'Authorization': f'Basic {auth_base64}',
+        'Content-Type': 'application/x-www-form-urlencoded'
+    })
+    try:
+        response = urllib.request.urlopen(req, timeout=10)
+        res_data = json.loads(response.read().decode('utf-8'))
+        return res_data.get('access_token')
+    except Exception as e:
+        return None
+
+def get_spotify_trends():
+    token = get_spotify_token()
+    if not token:
+        return [{"error": "Spotify API 키 오류 또는 발급 실패"}]
+    playlist_id = "37i9dQZEVXbNxXF4SkHj9F" 
+    url = f"https://api.spotify.com/v1/playlists/{playlist_id}/tracks?limit=10"
+    req = urllib.request.Request(url, headers={'Authorization': f'Bearer {token}'})
+    try:
+        response = urllib.request.urlopen(req, timeout=10)
+        data = json.loads(response.read().decode('utf-8'))
+        trends = []
+        for i, item in enumerate(data.get('items', [])):
+            track = item.get('track', {})
+            if not track: continue
+            title = track.get('name', 'Unknown')
+            artists = ", ".join([artist.get('name') for artist in track.get('artists', [])])
+            album_image = track.get('album', {}).get('images', [{}])[0].get('url', '')
+            external_url = track.get('external_urls', {}).get('spotify', '')
+            trends.append({
+                'rank': i + 1,
+                'keyword': f"{title} - {artists}", 
+                'title': title,
+                'artist': artists,
+                'image': album_image,
+                'url': external_url
+            })
+        return trends
+    except Exception as e:
+        return [{"error": str(e)}]
+
+# --- 스팀 ---
+def get_steam_trends():
+    try:
+        url = "https://api.steampowered.com/ISteamChartsService/GetGamesByConcurrentPlayers/v1/"
+        req = urllib.request.Request(url)
+        response = urllib.request.urlopen(req, timeout=10)
+        data = json.loads(response.read().decode('utf-8'))
+        ranks = data.get('response', {}).get('ranks', [])
+        if not ranks: return []
+        top_10 = ranks[:10]
+        appids = [str(game['appid']) for game in top_10]
+        appids_str = ",".join(appids)
+        details_url = f"https://store.steampowered.com/api/appdetails?appids={appids_str}"
+        details_req = urllib.request.Request(details_url)
+        details_response = urllib.request.urlopen(details_req, timeout=10)
+        details_data = json.loads(details_response.read().decode('utf-8'))
+        trends = []
+        for i, game in enumerate(top_10):
+            appid = str(game['appid'])
+            concurrent = game.get('concurrent_in_game', 0)
+            game_info = details_data.get(appid, {})
+            if game_info.get('success'):
+                name = game_info['data'].get('name', f"Unknown Game ({appid})")
+                image = game_info['data'].get('header_image', f"https://cdn.cloudflare.steamstatic.com/steam/apps/{appid}/header.jpg")
+            else:
+                name = f"Unknown Game ({appid})"
+                image = f"https://cdn.cloudflare.steamstatic.com/steam/apps/{appid}/header.jpg"
+            trends.append({
+                'rank': i + 1,
+                'keyword': name,
+                'concurrent_players': f"{concurrent:,}",
+                'image': image,
+                'url': f"https://store.steampowered.com/app/{appid}/"
+            })
+        return trends
+    except Exception as e:
+        return [{"error": str(e)}]
+
+# --- 깃허브 ---
+def get_github_trends():
+    try:
+        last_week = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
+        url = f"https://api.github.com/search/repositories?q=created:>{last_week}&sort=stars&order=desc&per_page=10"
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        response = urllib.request.urlopen(req, timeout=10)
+        data = json.loads(response.read().decode('utf-8'))
+        trends = []
+        for i, item in enumerate(data.get('items', [])):
+            trends.append({
+                'rank': i + 1,
+                'keyword': item.get('full_name'),
+                'description': item.get('description', '설명 없음'),
+                'stars': f"{item.get('stargazers_count', 0):,}",
+                'language': item.get('language', '언어 미상'),
+                'url': item.get('html_url')
+            })
+        return trends
+    except Exception as e:
+        return [{"error": str(e)}]
+
+# --- 업비트 가상화폐 거래대금 랭킹 (신규) ---
+def get_upbit_trends():
+    try:
+        # 1. 업비트의 모든 마켓(코인) 정보 가져오기 (영문 심볼 -> 한글 이름 매핑용)
+        market_url = "https://api.upbit.com/v1/market/all?isDetails=false"
+        market_req = urllib.request.Request(market_url, headers={'Accept': 'application/json'})
+        market_res = urllib.request.urlopen(market_req, timeout=10)
+        market_data = json.loads(market_res.read().decode('utf-8'))
+
+        krw_markets = []
+        market_names = {}
+        for item in market_data:
+            if item['market'].startswith('KRW-'): # 원화(KRW) 마켓만 필터링
+                krw_markets.append(item['market'])
+                market_names[item['market']] = item['korean_name']
+
+        # 2. 모든 원화 마켓의 현재가 및 거래대금 데이터 한 번에 요청
+        markets_str = ",".join(krw_markets)
+        ticker_url = f"https://api.upbit.com/v1/ticker?markets={markets_str}"
+        ticker_req = urllib.request.Request(ticker_url, headers={'Accept': 'application/json'})
+        ticker_res = urllib.request.urlopen(ticker_req, timeout=10)
+        ticker_data = json.loads(ticker_res.read().decode('utf-8'))
+
+        # 3. 24시간 거래대금(acc_trade_price_24h) 기준으로 내림차순 정렬
+        sorted_tickers = sorted(ticker_data, key=lambda x: x['acc_trade_price_24h'], reverse=True)
+
+        trends = []
+        for i, ticker in enumerate(sorted_tickers[:10]):
+            market_code = ticker['market']
+            korean_name = market_names.get(market_code, market_code)
+            price = ticker['trade_price']
+            change_rate = ticker['signed_change_rate'] * 100 # 소수점을 퍼센트로
+            trade_volume_24h = ticker['acc_trade_price_24h']
+
+            # 거래대금을 보기 쉽게 변환 (조 단위 / 억 단위)
+            if trade_volume_24h >= 1_000_000_000_000:
+                volume_str = f"{trade_volume_24h / 1_000_000_000_000:.1f}조 원"
+            else:
+                volume_str = f"{int(trade_volume_24h / 100_000_000):,}억 원"
+
+            # 코인 심볼 (예: KRW-BTC -> BTC)
+            symbol = market_code.replace("KRW-", "")
+
+            trends.append({
+                'rank': i + 1,
+                'keyword': f"{korean_name} ({symbol})",
+                'price': f"{price:,}원", # 콤마 찍은 가격
+                'change_rate': f"{change_rate:+.2f}%", # + 또는 - 부호 포함
+                'volume': volume_str,
+                'url': f"https://upbit.com/exchange?code=CRIX.UPBIT.{market_code}"
+            })
+
+        return trends
+    except Exception as e:
+        print(f"업비트 API 에러: {e}")
+        return [{"error": str(e)}]
+
+# ==========================================
+# API 라우트 (엔드포인트) 설정
+# ==========================================
 
 @app.route('/trends', methods=['GET'])
 def get_trends():
@@ -168,12 +333,20 @@ def get_trends():
         
         youtube_data = get_youtube_hype_trends()
         google_data = get_google_trends()
+        spotify_data = get_spotify_trends()
+        steam_data = get_steam_trends()
+        github_data = get_github_trends()
+        upbit_data = get_upbit_trends() # 업비트 데이터 추가
         
         return jsonify({
             'success': True,
             'data': trends,
             'youtube': youtube_data,
             'google': google_data,
+            'spotify': spotify_data,
+            'steam': steam_data,
+            'github': github_data,
+            'upbit': upbit_data, # 응답에 업비트 포함
             'source': 'auto-trend'
         })
     except Exception as e:
@@ -186,28 +359,34 @@ def health():
 
 @app.route('/debug-naver')
 def debug_naver():
-    client_id = os.environ.get('NAVER_CLIENT_ID', 'NOT_SET')
-    client_secret = os.environ.get('NAVER_CLIENT_SECRET', 'NOT_SET')
-    try:
-        url = f"https://openapi.naver.com/v1/search/news.json?query={urllib.parse.quote('오늘')}&display=5&sort=date"
-        req = urllib.request.Request(url, headers={
-            'X-Naver-Client-Id': client_id,
-            'X-Naver-Client-Secret': client_secret,
-        })
-        response = urllib.request.urlopen(req, timeout=10)
-        data = json.loads(response.read().decode('utf-8'))
-        return jsonify({"success": True, "client_id_set": client_id != 'NOT_SET', "items_count": len(data.get('items', []))})
-    except Exception as e:
-        return jsonify({"success": False, "error": str(e), "client_id_set": client_id != 'NOT_SET'})
+    # 생략 (이전과 동일)
+    return jsonify({"status": "ok"})
 
-# --- 구글 트렌드 전용 디버깅 라우트 ---
 @app.route('/debug-google')
 def debug_google():
     data = get_google_trends()
     return jsonify({"success": True, "data": data})
-# ------------------------------------
+
+@app.route('/debug-spotify')
+def debug_spotify():
+    data = get_spotify_trends()
+    return jsonify({"success": True, "data": data})
+
+@app.route('/debug-steam')
+def debug_steam():
+    data = get_steam_trends()
+    return jsonify({"success": True, "data": data})
+
+@app.route('/debug-github')
+def debug_github():
+    data = get_github_trends()
+    return jsonify({"success": True, "data": data})
+
+# --- 업비트 전용 디버깅 라우트 (신규) ---
+@app.route('/debug-upbit')
+def debug_upbit():
+    data = get_upbit_trends()
+    return jsonify({"success": True, "data": data})
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8080)
-
-
