@@ -186,120 +186,128 @@ def get_spotify_token():
         return None
 
 
+def _parse_spotify_playlist(data):
+    """플레이리스트 응답에서 트랙 목록 파싱 (공통 헬퍼)"""
+    trends = []
+    for item in data.get('items', []):
+        if not item:
+            continue
+        track = item.get('track')
+        if not track or track.get('type') != 'track':
+            continue
+        title = track.get('name', 'Unknown')
+        artists = ", ".join([a.get('name', '') for a in track.get('artists', [])])
+        images = track.get('album', {}).get('images', [])
+        album_image = images[0].get('url', '') if images else ''
+        external_url = track.get('external_urls', {}).get('spotify', '')
+        trends.append({
+            'rank': len(trends) + 1,
+            'keyword': f"{title} - {artists}",
+            'title': title,
+            'artist': artists,
+            'image': album_image,
+            'url': external_url
+        })
+        if len(trends) >= 10:
+            break
+    return trends
+
+
+def _fetch_spotify_playlist(token, playlist_id, market=None):
+    """단일 플레이리스트 fetch, 성공 시 트랙 리스트 반환 / 실패 시 None"""
+    market_param = f"&market={market}" if market else ""
+    url = f"https://api.spotify.com/v1/playlists/{playlist_id}/tracks?limit=20{market_param}"
+    req = urllib.request.Request(url, headers={'Authorization': f'Bearer {token}'})
+    try:
+        response = urllib.request.urlopen(req, timeout=10)
+        data = json.loads(response.read().decode('utf-8'))
+        return _parse_spotify_playlist(data)
+    except urllib.error.HTTPError as e:
+        print(f"[Spotify] 플레이리스트 {playlist_id} HTTP {e.code}")
+        return None
+    except Exception as e:
+        print(f"[Spotify] 플레이리스트 {playlist_id} 에러: {e}")
+        return None
+
+
 def get_spotify_trends():
     token = get_spotify_token()
     if not token:
         return [{"error": "Spotify 토큰 발급 실패 (API 키를 확인하세요)"}]
 
-    # 한국 Top 50 플레이리스트 (글로벌: 37i9dQZEVXbMDoHDwVN2tF)
-    playlist_id = "37i9dQZEVXbJiZcmkflKDy"
-    url = f"https://api.spotify.com/v1/playlists/{playlist_id}/tracks?limit=20&market=KR"
-    req = urllib.request.Request(url, headers={'Authorization': f'Bearer {token}'})
+    # 우선순위대로 시도할 플레이리스트 목록
+    # Client Credentials로 접근 가능한 공개 플레이리스트만 사용
+    candidates = [
+        ("37i9dQZEVXbMDoHDwVN2tF", None),       # Global Top 50 (시장 제한 없음)
+        ("37i9dQZEVXbJiZcmkflKDy", "KR"),        # Korea Top 50
+        ("37i9dQZEVXbNxXF4SkHj9F", None),        # Global Top 50 (구 ID)
+        ("37i9dQZF1DXcBWIGoYBM5M", None),        # Today's Top Hits
+    ]
 
-    try:
-        response = urllib.request.urlopen(req, timeout=10)
-        data = json.loads(response.read().decode('utf-8'))
-        trends = []
+    for playlist_id, market in candidates:
+        tracks = _fetch_spotify_playlist(token, playlist_id, market)
+        if tracks:
+            print(f"[Spotify] 플레이리스트 {playlist_id} 성공 ({len(tracks)}곡)")
+            return tracks
 
-        for item in data.get('items', []):
-            # item 또는 track이 None인 경우 방어 처리
-            if not item:
-                continue
-            track = item.get('track')
-            if not track:
-                continue
-            # 팟캐스트 에피소드 등 음악이 아닌 항목 스킵
-            if track.get('type') != 'track':
-                continue
-            # 재생 불가 트랙 스킵
-            if not track.get('is_playable', True):
-                continue
-
-            title = track.get('name', 'Unknown')
-            artists = ", ".join([
-                artist.get('name', '') for artist in track.get('artists', [])
-            ])
-            images = track.get('album', {}).get('images', [])
-            album_image = images[0].get('url', '') if images else ''
-            external_url = track.get('external_urls', {}).get('spotify', '')
-
-            trends.append({
-                'rank': len(trends) + 1,
-                'keyword': f"{title} - {artists}",
-                'title': title,
-                'artist': artists,
-                'image': album_image,
-                'url': external_url
-            })
-
-            if len(trends) >= 10:
-                break
-
-        if not trends:
-            return [{"error": "트랙 데이터 없음 (플레이리스트 접근 불가 또는 빈 응답)"}]
-        return trends
-
-    except urllib.error.HTTPError as e:
-        error_body = e.read().decode('utf-8')
-        print(f"[Spotify] HTTP {e.code}: {error_body}")
-        # 404면 플레이리스트 ID 문제, 401/403이면 토큰/권한 문제
-        if e.code == 404:
-            return [{"error": f"Spotify 플레이리스트를 찾을 수 없음 (404) - 플레이리스트 ID를 확인하세요"}]
-        elif e.code in (401, 403):
-            return [{"error": f"Spotify 인증 오류 ({e.code}) - API 키를 확인하세요"}]
-        return [{"error": f"Spotify HTTP {e.code}"}]
-    except Exception as e:
-        print(f"[Spotify] 에러: {e}")
-        return [{"error": str(e)}]
+    return [{"error": "Spotify 모든 플레이리스트 접근 실패 - 네트워크 또는 API 키를 확인하세요"}]
 
 
 # ==========================================
 # 스팀 (수정)
 # ==========================================
 
-def get_steam_trends():
+def _get_steam_game_details(appids):
+    """Steam Store API로 게임 상세정보 조회, 실패 시 빈 dict 반환"""
     try:
-        # GetMostPlayedGames 사용 (GetGamesByConcurrentPlayers는 현재 미작동)
-        url = "https://api.steampowered.com/ISteamChartsService/GetMostPlayedGames/v1/"
-        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        response = urllib.request.urlopen(req, timeout=10)
-        data = json.loads(response.read().decode('utf-8'))
-
-        ranks = data.get('response', {}).get('ranks', [])
-        if not ranks:
-            print("[Steam] 랭킹 데이터 없음 - 응답:", data)
-            return [{"error": "Steam 랭킹 데이터 없음"}]
-
-        top_10 = ranks[:10]
-        appids = [str(game['appid']) for game in top_10]
         appids_str = ",".join(appids)
-
-        # 한국 스토어 기준 게임 상세 정보
-        details_url = (
+        url = (
             f"https://store.steampowered.com/api/appdetails"
             f"?appids={appids_str}&cc=kr&l=korean"
         )
-        details_req = urllib.request.Request(
-            details_url, headers={'User-Agent': 'Mozilla/5.0'}
-        )
-        details_response = urllib.request.urlopen(details_req, timeout=15)
-        details_data = json.loads(details_response.read().decode('utf-8'))
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        res = urllib.request.urlopen(req, timeout=15)
+        return json.loads(res.read().decode('utf-8'))
+    except Exception as e:
+        print(f"[Steam] appdetails 조회 실패: {e}")
+        return {}
+
+
+def get_steam_trends():
+    try:
+        # GetMostPlayedGames로 현재 인기 게임 랭킹 조회
+        url = "https://api.steampowered.com/ISteamChartsService/GetMostPlayedGames/v1/"
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        response = urllib.request.urlopen(req, timeout=10)
+        raw = response.read().decode('utf-8')
+        data = json.loads(raw)
+
+        ranks = data.get('response', {}).get('ranks', [])
+        if not ranks:
+            print(f"[Steam] ranks 비어 있음. 전체 응답: {raw[:300]}")
+            return [{"error": "Steam 랭킹 데이터 없음"}]
+
+        top_10 = ranks[:10]
+        appids = [str(g['appid']) for g in top_10]
+
+        # 게임 상세 정보 (실패해도 폴백으로 진행)
+        details_data = _get_steam_game_details(appids)
 
         trends = []
         for i, game in enumerate(top_10):
             appid = str(game['appid'])
-            concurrent = game.get('concurrent_in_game', 0)
-            peak = game.get('peak_in_game', concurrent)
+            # 필드명 안전 처리 (API 버전별로 다를 수 있음)
+            concurrent = int(game.get('concurrent_in_game') or game.get('concurrent', 0))
+            peak = int(game.get('peak_in_game') or game.get('peak', concurrent))
 
             game_info = details_data.get(appid, {})
             if game_info.get('success') and game_info.get('data'):
-                name = game_info['data'].get('name', f"Unknown ({appid})")
-                image = game_info['data'].get(
-                    'header_image',
+                name = game_info['data'].get('name') or f"App {appid}"
+                image = game_info['data'].get('header_image') or \
                     f"https://cdn.cloudflare.steamstatic.com/steam/apps/{appid}/header.jpg"
-                )
             else:
-                name = f"Unknown ({appid})"
+                # Store API 실패 시 CDN URL로 폴백
+                name = f"App {appid}"
                 image = f"https://cdn.cloudflare.steamstatic.com/steam/apps/{appid}/header.jpg"
 
             trends.append({
@@ -317,9 +325,12 @@ def get_steam_trends():
         error_body = e.read().decode('utf-8')
         print(f"[Steam] HTTP {e.code}: {error_body}")
         return [{"error": f"Steam HTTP {e.code}"}]
+    except json.JSONDecodeError as e:
+        print(f"[Steam] JSON 파싱 실패: {e}")
+        return [{"error": "Steam API 응답 파싱 실패"}]
     except Exception as e:
-        print(f"[Steam] 에러: {e}")
-        return [{"error": str(e)}]
+        print(f"[Steam] 에러: {type(e).__name__}: {e}")
+        return [{"error": f"Steam 오류: {type(e).__name__}"}]
 
 
 # ==========================================
