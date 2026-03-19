@@ -6,6 +6,7 @@ import urllib.parse
 import json
 import os
 import re
+import requests  # ← 추가
 from datetime import datetime, timedelta
 
 app = Flask(__name__)
@@ -14,6 +15,7 @@ CORS(app)
 NAVER_CLIENT_ID = os.environ.get('NAVER_CLIENT_ID', '')
 NAVER_CLIENT_SECRET = os.environ.get('NAVER_CLIENT_SECRET', '')
 YOUTUBE_API_KEY = os.environ.get('YOUTUBE_API_KEY', '')
+GAS_PROXY_URL = os.environ.get('GAS_PROXY_URL', '')
 
 DEFAULT_KEYWORDS = ["환율", "날씨", "삼성전자", "이재명", "손흥민", "GPT", "아이유", "뉴진스", "비트코인", "넷플릭스"]
 
@@ -109,41 +111,33 @@ def get_youtube_hype_trends():
 
 # --- 새롭게 수정된 구글 트렌드 함수 (JSON API 우회 방식) ---
 def get_google_trends():
-    url = "https://trends.google.com/trends/api/dailytrends?hl=ko&tz=-540&geo=KR"
+    if not GAS_PROXY_URL:
+        print("GAS_PROXY_URL 환경변수가 설정되지 않았습니다.")
+        return []
     try:
-        req = urllib.request.Request(url, headers={
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'application/json, text/plain, */*'
-        })
-        response = urllib.request.urlopen(req, timeout=10)
-        
-        # 구글 JSON 데이터 앞부분의 쓰레기 문자(")]}',") 제거
-        raw_data = response.read().decode('utf-8')
-        json_data = json.loads(raw_data.split('\n')[1])
-        
-        trends = []
-        today_trends = json_data['default']['trendingSearchesDays'][0]['trendingSearches']
-        
-        for i, item in enumerate(today_trends):
-            if i >= 10:
-                break
-                
-            title = item['title']['query']
-            traffic = item.get('formattedTraffic', "N/A")
-            
-            articles = item.get('articles', [])
-            link = articles[0]['url'] if articles else f"https://www.google.com/search?q={urllib.parse.quote(title)}"
-            
-            trends.append({
-                'rank': i + 1,
-                'keyword': title,
-                'traffic': traffic,
-                'url': link
-            })
-            
-        return trends
+        response = requests.get(
+            GAS_PROXY_URL,
+            timeout=15,
+            allow_redirects=True,
+            headers={"Accept": "application/json"}
+        )
+        response.raise_for_status()
+        data = response.json()
+
+        if data.get("status") != "ok":
+            print(f"GAS 프록시 에러: {data.get('error')}")
+            return []
+
+        return data.get("data", [])
+
+    except requests.exceptions.Timeout:
+        print("GAS 프록시 요청 타임아웃")
+        return []
+    except requests.exceptions.ConnectionError as e:
+        print(f"GAS 프록시 연결 실패: {e}")
+        return []
     except Exception as e:
-        print(f"구글 트렌드 API 에러: {e}")
+        print(f"구글 트렌드 에러: {e}")
         return []
 # ----------------------------------------------------
 
