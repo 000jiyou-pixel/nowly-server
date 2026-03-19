@@ -11,7 +11,20 @@ from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 app = Flask(__name__)
-CORS(app)
+
+# CORS: 모든 출처 명시 허용 (Netlify, 로컬 등)
+CORS(app, resources={r"/*": {
+    "origins": "*",
+    "allow_headers": ["Content-Type", "Authorization", "Accept"],
+    "methods": ["GET", "POST", "OPTIONS"]
+}})
+
+@app.after_request
+def after_request(response):
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, Accept"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    return response
 
 # ==========================================
 # 환경 변수
