@@ -7,7 +7,6 @@ import json
 import os
 import re
 import requests
-import base64
 from datetime import datetime, timedelta
 
 app = Flask(__name__)
@@ -18,8 +17,6 @@ NAVER_CLIENT_ID = os.environ.get('NAVER_CLIENT_ID', '')
 NAVER_CLIENT_SECRET = os.environ.get('NAVER_CLIENT_SECRET', '')
 YOUTUBE_API_KEY = os.environ.get('YOUTUBE_API_KEY', '')
 GAS_PROXY_URL = os.environ.get('GAS_PROXY_URL', '')
-SPOTIFY_CLIENT_ID = os.environ.get('SPOTIFY_CLIENT_ID', '')
-SPOTIFY_CLIENT_SECRET = os.environ.get('SPOTIFY_CLIENT_SECRET', '')
 
 DEFAULT_KEYWORDS = ["환율", "날씨", "삼성전자", "이재명", "손흥민", "GPT", "아이유", "뉴진스", "비트코인", "넷플릭스"]
 
@@ -160,119 +157,83 @@ def get_google_trends():
 
 
 # ==========================================
-# 스포티파이 (수정)
+# 유튜브 뮤직 차트 (Spotify 대체)
 # ==========================================
-
-def get_spotify_token():
-    if not SPOTIFY_CLIENT_ID or not SPOTIFY_CLIENT_SECRET:
-        return None
-    url = "https://accounts.spotify.com/api/token"
-    auth_string = f"{SPOTIFY_CLIENT_ID}:{SPOTIFY_CLIENT_SECRET}"
-    auth_base64 = base64.b64encode(auth_string.encode('utf-8')).decode('utf-8')
-    data = urllib.parse.urlencode({'grant_type': 'client_credentials'}).encode('utf-8')
-    req = urllib.request.Request(url, data=data, headers={
-        'Authorization': f'Basic {auth_base64}',
-        'Content-Type': 'application/x-www-form-urlencoded'
-    })
-    try:
-        response = urllib.request.urlopen(req, timeout=10)
-        res_data = json.loads(response.read().decode('utf-8'))
-        return res_data.get('access_token')
-    except urllib.error.HTTPError as e:
-        print(f"[Spotify 토큰] HTTP {e.code}: {e.read().decode('utf-8')}")
-        return None
-    except Exception as e:
-        print(f"[Spotify 토큰] 에러: {e}")
-        return None
-
 
 def get_spotify_trends():
     """
-    Spotify Charts CSV API로 글로벌 Top 10 조회.
-    CSV는 인증 불필요 - Client Credentials 방식의 403 문제를 완전히 우회.
-    트랙 이미지는 Spotify Web API로 보완 (실패 시 이미지 없이 반환).
+    Spotify 대신 YouTube 한국 인기 급상승 음악 Top 10으로 대체.
+    - videoCategoryId=10 : Music 카테고리만 필터링
+    - regionCode=KR      : 한국 기준
+    - chart=mostPopular  : 인기 급상승 기준
+    - 이미 보유한 YOUTUBE_API_KEY 재사용, 추가 인증 불필요
+    응답 키는 spotify 그대로 유지해서 프론트 수정 최소화.
     """
-    import csv
-    import io
+    if not YOUTUBE_API_KEY:
+        return [{"error": "YOUTUBE_API_KEY 환경변수 없음"}]
 
-    # 어제 날짜 기준 (오늘 차트는 오후에 업데이트되므로 어제가 안전)
-    yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
-    chart_url = (
-        f"https://charts.spotify.com/charts/view/regional-kr-daily/{yesterday}"
-        f"?output=csv"
+    url = (
+        "https://www.googleapis.com/youtube/v3/videos"
+        "?part=snippet,statistics"
+        "&chart=mostPopular"
+        "&regionCode=KR"
+        "&videoCategoryId=10"
+        "&maxResults=10"
+        f"&key={YOUTUBE_API_KEY}"
     )
 
     try:
-        req = urllib.request.Request(
-            chart_url,
-            headers={
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                'Accept': 'text/csv,*/*',
-                'Accept-Language': 'ko-KR,ko;q=0.9',
-                'Referer': 'https://charts.spotify.com/',
-            }
-        )
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
         response = urllib.request.urlopen(req, timeout=10)
-        raw = response.read().decode('utf-8')
-        reader = csv.DictReader(io.StringIO(raw))
+        data = json.loads(response.read().decode('utf-8'))
+
+        if 'error' in data:
+            msg = data['error'].get('message', '알 수 없는 에러')
+            print(f"[YT Music] API 에러: {msg}")
+            return [{"error": f"YouTube API 오류: {msg}"}]
+
+        items = data.get('items', [])
+        if not items:
+            return [{"error": "YouTube 음악 차트 데이터 없음"}]
 
         trends = []
-        track_ids = []
+        for i, item in enumerate(items):
+            video_id = item['id']
+            snippet = item.get('snippet', {})
+            statistics = item.get('statistics', {})
+            thumbnails = snippet.get('thumbnails', {})
 
-        for row in reader:
-            if len(trends) >= 10:
-                break
-            # CSV 컬럼: rank, uri, artist_names, track_name, peak_rank, ...
-            title = row.get('track_name', '').strip()
-            artist = row.get('artist_names', '').strip()
-            rank = row.get('rank', str(len(trends) + 1)).strip()
-            uri = row.get('uri', '').strip()          # spotify:track:XXXXX
-            track_id = uri.split(':')[-1] if uri else ''
-
-            if not title:
-                continue
-
-            track_ids.append(track_id)
-            trends.append({
-                'rank': int(rank) if rank.isdigit() else len(trends) + 1,
-                'keyword': f"{title} - {artist}",
-                'title': title,
-                'artist': artist,
-                'image': '',
-                'url': f"https://open.spotify.com/track/{track_id}" if track_id else ''
-            })
-
-        if not trends:
-            print(f"[Spotify] CSV 파싱 결과 없음. 응답 앞부분: {raw[:200]}")
-            return [{"error": "Spotify 차트 데이터 없음 (CSV 파싱 실패)"}]
-
-        # 트랙 이미지를 Web API로 보완 (실패해도 이미지 없이 반환)
-        token = get_spotify_token()
-        if token and track_ids:
-            ids_str = ",".join(filter(None, track_ids[:10]))
-            tracks_url = f"https://api.spotify.com/v1/tracks?ids={ids_str}&market=KR"
-            tracks_req = urllib.request.Request(
-                tracks_url, headers={'Authorization': f'Bearer {token}'}
+            thumbnail = (
+                thumbnails.get('maxres', {}).get('url') or
+                thumbnails.get('high', {}).get('url') or
+                thumbnails.get('medium', {}).get('url') or
+                f"https://img.youtube.com/vi/{video_id}/mqdefault.jpg"
             )
-            try:
-                tracks_res = urllib.request.urlopen(tracks_req, timeout=10)
-                tracks_data = json.loads(tracks_res.read().decode('utf-8'))
-                for i, track in enumerate(tracks_data.get('tracks', [])):
-                    if track and i < len(trends):
-                        images = track.get('album', {}).get('images', [])
-                        trends[i]['image'] = images[0].get('url', '') if images else ''
-            except Exception as e:
-                print(f"[Spotify] 트랙 이미지 보완 실패 (무시): {e}")
+
+            title = snippet.get('title', '')
+            channel = snippet.get('channelTitle', '')
+            view_count = int(statistics.get('viewCount', 0))
+
+            trends.append({
+                'rank': i + 1,
+                'keyword': title,
+                'title': title,
+                'artist': channel,
+                'image': thumbnail,
+                'url': f"https://www.youtube.com/watch?v={video_id}",
+                'viewCount': view_count,
+                'videoId': video_id,
+            })
 
         return trends
 
     except urllib.error.HTTPError as e:
-        body = e.read().decode('utf-8')
-        print(f"[Spotify] Charts CSV HTTP {e.code}: {body[:200]}")
-        return [{"error": f"Spotify Charts HTTP {e.code}"}]
+        msg = e.read().decode('utf-8')
+        print(f"[YT Music] HTTP {e.code}: {msg[:200]}")
+        return [{"error": f"YouTube HTTP {e.code}"}]
     except Exception as e:
-        print(f"[Spotify] 에러: {type(e).__name__}: {e}")
-        return [{"error": f"Spotify 오류: {type(e).__name__}"}]
+        print(f"[YT Music] 에러: {type(e).__name__}: {e}")
+        return [{"error": f"YouTube Music 오류: {type(e).__name__}"}]
 
 
 # ==========================================
@@ -281,10 +242,11 @@ def get_spotify_trends():
 
 def _get_steam_game_details(appids):
     """
-    SteamSpy API로 게임 이름 조회 (Steam Store appdetails보다 안정적).
-    실패 시 빈 dict 반환.
+    게임 이름 조회: SteamSpy 우선, 실패한 appid는 Steam Store API로 fallback.
     """
     result = {}
+
+    # 1차: SteamSpy
     for appid in appids:
         try:
             url = f"https://steamspy.com/api.php?request=appdetails&appid={appid}"
@@ -295,6 +257,28 @@ def _get_steam_game_details(appids):
                 result[appid] = {'name': data['name']}
         except Exception as e:
             print(f"[Steam] SteamSpy {appid} 조회 실패: {e}")
+
+    # 2차: SteamSpy에서 못 가져온 appid → Steam Store API fallback
+    missing = [aid for aid in appids if aid not in result]
+    if missing:
+        try:
+            ids_str = ",".join(missing)
+            store_url = (
+                f"https://store.steampowered.com/api/appdetails"
+                f"?appids={ids_str}&cc=kr&l=korean&filters=basic"
+            )
+            store_req = urllib.request.Request(
+                store_url, headers={'User-Agent': 'Mozilla/5.0'}
+            )
+            store_res = urllib.request.urlopen(store_req, timeout=12)
+            store_data = json.loads(store_res.read().decode('utf-8'))
+            for appid in missing:
+                info = store_data.get(appid, {})
+                if info.get('success') and info.get('data', {}).get('name'):
+                    result[appid] = {'name': info['data']['name']}
+        except Exception as e:
+            print(f"[Steam] Store API fallback 실패: {e}")
+
     return result
 
 
