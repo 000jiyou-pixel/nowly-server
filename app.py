@@ -186,71 +186,93 @@ def get_spotify_token():
         return None
 
 
-def _parse_spotify_playlist(data):
-    """플레이리스트 응답에서 트랙 목록 파싱 (공통 헬퍼)"""
-    trends = []
-    for item in data.get('items', []):
-        if not item:
-            continue
-        track = item.get('track')
-        if not track or track.get('type') != 'track':
-            continue
-        title = track.get('name', 'Unknown')
-        artists = ", ".join([a.get('name', '') for a in track.get('artists', [])])
-        images = track.get('album', {}).get('images', [])
-        album_image = images[0].get('url', '') if images else ''
-        external_url = track.get('external_urls', {}).get('spotify', '')
-        trends.append({
-            'rank': len(trends) + 1,
-            'keyword': f"{title} - {artists}",
-            'title': title,
-            'artist': artists,
-            'image': album_image,
-            'url': external_url
-        })
-        if len(trends) >= 10:
-            break
-    return trends
-
-
-def _fetch_spotify_playlist(token, playlist_id, market=None):
-    """단일 플레이리스트 fetch, 성공 시 트랙 리스트 반환 / 실패 시 None"""
-    market_param = f"&market={market}" if market else ""
-    url = f"https://api.spotify.com/v1/playlists/{playlist_id}/tracks?limit=20{market_param}"
-    req = urllib.request.Request(url, headers={'Authorization': f'Bearer {token}'})
-    try:
-        response = urllib.request.urlopen(req, timeout=10)
-        data = json.loads(response.read().decode('utf-8'))
-        return _parse_spotify_playlist(data)
-    except urllib.error.HTTPError as e:
-        print(f"[Spotify] 플레이리스트 {playlist_id} HTTP {e.code}")
-        return None
-    except Exception as e:
-        print(f"[Spotify] 플레이리스트 {playlist_id} 에러: {e}")
-        return None
-
-
 def get_spotify_trends():
-    token = get_spotify_token()
-    if not token:
-        return [{"error": "Spotify 토큰 발급 실패 (API 키를 확인하세요)"}]
+    """
+    Spotify Charts CSV API로 글로벌 Top 10 조회.
+    CSV는 인증 불필요 - Client Credentials 방식의 403 문제를 완전히 우회.
+    트랙 이미지는 Spotify Web API로 보완 (실패 시 이미지 없이 반환).
+    """
+    import csv
+    import io
 
-    # 우선순위대로 시도할 플레이리스트 목록
-    # Client Credentials로 접근 가능한 공개 플레이리스트만 사용
-    candidates = [
-        ("37i9dQZEVXbMDoHDwVN2tF", None),       # Global Top 50 (시장 제한 없음)
-        ("37i9dQZEVXbJiZcmkflKDy", "KR"),        # Korea Top 50
-        ("37i9dQZEVXbNxXF4SkHj9F", None),        # Global Top 50 (구 ID)
-        ("37i9dQZF1DXcBWIGoYBM5M", None),        # Today's Top Hits
-    ]
+    # 어제 날짜 기준 (오늘 차트는 오후에 업데이트되므로 어제가 안전)
+    yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
+    chart_url = (
+        f"https://charts.spotify.com/charts/view/regional-kr-daily/{yesterday}"
+        f"?output=csv"
+    )
 
-    for playlist_id, market in candidates:
-        tracks = _fetch_spotify_playlist(token, playlist_id, market)
-        if tracks:
-            print(f"[Spotify] 플레이리스트 {playlist_id} 성공 ({len(tracks)}곡)")
-            return tracks
+    try:
+        req = urllib.request.Request(
+            chart_url,
+            headers={
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'Accept': 'text/csv,*/*',
+                'Accept-Language': 'ko-KR,ko;q=0.9',
+                'Referer': 'https://charts.spotify.com/',
+            }
+        )
+        response = urllib.request.urlopen(req, timeout=10)
+        raw = response.read().decode('utf-8')
+        reader = csv.DictReader(io.StringIO(raw))
 
-    return [{"error": "Spotify 모든 플레이리스트 접근 실패 - 네트워크 또는 API 키를 확인하세요"}]
+        trends = []
+        track_ids = []
+
+        for row in reader:
+            if len(trends) >= 10:
+                break
+            # CSV 컬럼: rank, uri, artist_names, track_name, peak_rank, ...
+            title = row.get('track_name', '').strip()
+            artist = row.get('artist_names', '').strip()
+            rank = row.get('rank', str(len(trends) + 1)).strip()
+            uri = row.get('uri', '').strip()          # spotify:track:XXXXX
+            track_id = uri.split(':')[-1] if uri else ''
+
+            if not title:
+                continue
+
+            track_ids.append(track_id)
+            trends.append({
+                'rank': int(rank) if rank.isdigit() else len(trends) + 1,
+                'keyword': f"{title} - {artist}",
+                'title': title,
+                'artist': artist,
+                'image': '',
+                'url': f"https://open.spotify.com/track/{track_id}" if track_id else ''
+            })
+
+        if not trends:
+            print(f"[Spotify] CSV 파싱 결과 없음. 응답 앞부분: {raw[:200]}")
+            return [{"error": "Spotify 차트 데이터 없음 (CSV 파싱 실패)"}]
+
+        # 트랙 이미지를 Web API로 보완 (실패해도 이미지 없이 반환)
+        token = get_spotify_token()
+        if token and track_ids:
+            ids_str = ",".join(filter(None, track_ids[:10]))
+            tracks_url = f"https://api.spotify.com/v1/tracks?ids={ids_str}&market=KR"
+            tracks_req = urllib.request.Request(
+                tracks_url, headers={'Authorization': f'Bearer {token}'}
+            )
+            try:
+                tracks_res = urllib.request.urlopen(tracks_req, timeout=10)
+                tracks_data = json.loads(tracks_res.read().decode('utf-8'))
+                for i, track in enumerate(tracks_data.get('tracks', [])):
+                    if track and i < len(trends):
+                        images = track.get('album', {}).get('images', [])
+                        trends[i]['image'] = images[0].get('url', '') if images else ''
+            except Exception as e:
+                print(f"[Spotify] 트랙 이미지 보완 실패 (무시): {e}")
+
+        return trends
+
+    except urllib.error.HTTPError as e:
+        body = e.read().decode('utf-8')
+        print(f"[Spotify] Charts CSV HTTP {e.code}: {body[:200]}")
+        return [{"error": f"Spotify Charts HTTP {e.code}"}]
+    except Exception as e:
+        print(f"[Spotify] 에러: {type(e).__name__}: {e}")
+        return [{"error": f"Spotify 오류: {type(e).__name__}"}]
 
 
 # ==========================================
@@ -258,24 +280,26 @@ def get_spotify_trends():
 # ==========================================
 
 def _get_steam_game_details(appids):
-    """Steam Store API로 게임 상세정보 조회, 실패 시 빈 dict 반환"""
-    try:
-        appids_str = ",".join(appids)
-        url = (
-            f"https://store.steampowered.com/api/appdetails"
-            f"?appids={appids_str}&cc=kr&l=korean"
-        )
-        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        res = urllib.request.urlopen(req, timeout=15)
-        return json.loads(res.read().decode('utf-8'))
-    except Exception as e:
-        print(f"[Steam] appdetails 조회 실패: {e}")
-        return {}
+    """
+    SteamSpy API로 게임 이름 조회 (Steam Store appdetails보다 안정적).
+    실패 시 빈 dict 반환.
+    """
+    result = {}
+    for appid in appids:
+        try:
+            url = f"https://steamspy.com/api.php?request=appdetails&appid={appid}"
+            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+            res = urllib.request.urlopen(req, timeout=8)
+            data = json.loads(res.read().decode('utf-8'))
+            if data and data.get('name'):
+                result[appid] = {'name': data['name']}
+        except Exception as e:
+            print(f"[Steam] SteamSpy {appid} 조회 실패: {e}")
+    return result
 
 
 def get_steam_trends():
     try:
-        # GetMostPlayedGames로 현재 인기 게임 랭킹 조회
         url = "https://api.steampowered.com/ISteamChartsService/GetMostPlayedGames/v1/"
         req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
         response = urllib.request.urlopen(req, timeout=10)
@@ -284,36 +308,33 @@ def get_steam_trends():
 
         ranks = data.get('response', {}).get('ranks', [])
         if not ranks:
-            print(f"[Steam] ranks 비어 있음. 전체 응답: {raw[:300]}")
+            print(f"[Steam] ranks 비어 있음. 응답: {raw[:300]}")
             return [{"error": "Steam 랭킹 데이터 없음"}]
 
         top_10 = ranks[:10]
         appids = [str(g['appid']) for g in top_10]
 
-        # 게임 상세 정보 (실패해도 폴백으로 진행)
-        details_data = _get_steam_game_details(appids)
+        # SteamSpy로 게임 이름 조회
+        spy_data = _get_steam_game_details(appids)
 
         trends = []
         for i, game in enumerate(top_10):
             appid = str(game['appid'])
-            # 필드명 안전 처리 (API 버전별로 다를 수 있음)
-            concurrent = int(game.get('concurrent_in_game') or game.get('concurrent', 0))
-            peak = int(game.get('peak_in_game') or game.get('peak', concurrent))
 
-            game_info = details_data.get(appid, {})
-            if game_info.get('success') and game_info.get('data'):
-                name = game_info['data'].get('name') or f"App {appid}"
-                image = game_info['data'].get('header_image') or \
-                    f"https://cdn.cloudflare.steamstatic.com/steam/apps/{appid}/header.jpg"
-            else:
-                # Store API 실패 시 CDN URL로 폴백
-                name = f"App {appid}"
-                image = f"https://cdn.cloudflare.steamstatic.com/steam/apps/{appid}/header.jpg"
+            # GetMostPlayedGames는 peak_in_game만 신뢰 가능
+            # concurrent_in_game은 현재 시점 기준이라 0일 수 있음
+            peak = int(game.get('peak_in_game') or 0)
+            concurrent = int(game.get('concurrent_in_game') or 0)
+
+            name = spy_data.get(appid, {}).get('name') or f"App {appid}"
+            image = (
+                f"https://cdn.cloudflare.steamstatic.com/steam/apps/{appid}/header.jpg"
+            )
 
             trends.append({
                 'rank': i + 1,
                 'keyword': name,
-                'concurrent_players': f"{concurrent:,}",
+                'concurrent_players': f"{concurrent:,}" if concurrent else "집계 중",
                 'peak_players': f"{peak:,}",
                 'image': image,
                 'url': f"https://store.steampowered.com/app/{appid}/"
