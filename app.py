@@ -6,7 +6,6 @@ import urllib.parse
 import json
 import os
 import re
-import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 
 app = Flask(__name__)
@@ -108,25 +107,32 @@ def get_youtube_hype_trends():
     except Exception as e:
         return [{"error": str(e)}]
 
-# --- 새롭게 추가된 구글 트렌드 함수 ---
+# --- 새롭게 수정된 구글 트렌드 함수 (JSON API 우회 방식) ---
 def get_google_trends():
-    url = "https://trends.google.com/trends/trendingsearches/daily/rss?geo=KR"
+    url = "https://trends.google.com/trends/api/dailytrends?hl=ko&tz=-540&geo=KR"
     try:
         req = urllib.request.Request(url, headers={
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'application/json, text/plain, */*'
         })
         response = urllib.request.urlopen(req, timeout=10)
-        xml_data = response.read()
-        root = ET.fromstring(xml_data)
+        
+        # 구글 JSON 데이터 앞부분의 쓰레기 문자(")]}',") 제거
+        raw_data = response.read().decode('utf-8')
+        json_data = json.loads(raw_data.split('\n')[1])
         
         trends = []
-        for i, item in enumerate(root.findall('.//item')):
+        today_trends = json_data['default']['trendingSearchesDays'][0]['trendingSearches']
+        
+        for i, item in enumerate(today_trends):
             if i >= 10:
                 break
-            title = item.find('title').text
-            traffic_node = item.find('{https://trends.google.com/trends/trendingsearches/daily}approx_traffic')
-            traffic = traffic_node.text if traffic_node is not None else "N/A"
-            link = item.find('link').text
+                
+            title = item['title']['query']
+            traffic = item.get('formattedTraffic', "N/A")
+            
+            articles = item.get('articles', [])
+            link = articles[0]['url'] if articles else f"https://www.google.com/search?q={urllib.parse.quote(title)}"
             
             trends.append({
                 'rank': i + 1,
@@ -134,11 +140,12 @@ def get_google_trends():
                 'traffic': traffic,
                 'url': link
             })
+            
         return trends
     except Exception as e:
-        print(f"구글 트렌드 RSS 에러: {e}")
+        print(f"구글 트렌드 API 에러: {e}")
         return []
-# ----------------------------------
+# ----------------------------------------------------
 
 @app.route('/trends', methods=['GET'])
 def get_trends():
@@ -208,5 +215,3 @@ def debug_google():
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8080)
-
-
