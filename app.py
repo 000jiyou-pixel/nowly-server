@@ -10,6 +10,7 @@ import requests
 import time
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import xml.etree.ElementTree as ET # RSS(XML) 파싱을 위해 추가
 
 app = Flask(__name__)
 
@@ -28,13 +29,17 @@ def after_request(response):
     return response
 
 # ==========================================
-# 환경 변수
+# 🔐 환경 변수 (사진에 맞춰 모두 추가 완료!)
 # ==========================================
 NAVER_CLIENT_ID     = os.environ.get('NAVER_CLIENT_ID', '')
 NAVER_CLIENT_SECRET = os.environ.get('NAVER_CLIENT_SECRET', '')
 YOUTUBE_API_KEY     = os.environ.get('YOUTUBE_API_KEY', '')
 GAS_PROXY_URL       = os.environ.get('GAS_PROXY_URL', '')
 LASTFM_API_KEY      = os.environ.get('LASTFM_API_KEY', '')
+KOFIC_API_KEY       = os.environ.get('KOFIC_API_KEY', '')
+TMDB_API_KEY        = os.environ.get('TMDB_API_KEY', '')
+SEOUL_API_KEY       = os.environ.get('SEOUL_API_KEY', '')
+LIBRARY_API_KEY     = os.environ.get('LIBRARY_API_KEY', '')
 
 DEFAULT_KEYWORDS = [
     "환율", "날씨", "삼성전자", "이재명", "손흥민",
@@ -51,16 +56,13 @@ def get_cached_data(key, fetch_func, ttl=CACHE_TTL):
     now = time.time()
     cached = CACHE.get(key)
     
-    # 캐시가 있고, 만료 시간이 지나지 않았으면 캐시 데이터 즉시 반환
     if cached and (now - cached['time']) < ttl:
         print(f"🟢 [Cache HIT] {key} (남은 시간: {int(ttl - (now - cached['time']))}초)")
         return cached['data']
         
-    # 캐시가 없거나 만료되었으면 API를 새로 찔러서 데이터 갱신
     print(f"🔴 [Cache MISS] {key} 데이터 새로 갱신 중...")
     data = fetch_func()
     
-    # 만약 API 호출이 에러가 났다면, 10분이나 에러를 보여줄 수 없으니 1분(60초) 뒤에 다시 시도하도록 설정
     is_error = False
     if isinstance(data, list) and len(data) > 0 and 'error' in data[0]:
         is_error = True
@@ -72,9 +74,8 @@ def get_cached_data(key, fetch_func, ttl=CACHE_TTL):
     
     return data
 
-
 # ==========================================
-# 네이버 실시간 키워드 + 데이터랩
+# 기존 API들 (네이버, 유튜브, 구글, Lastfm, 깃허브, 업비트, 위키, 애니)
 # ==========================================
 def get_realtime_keywords():
     try:
@@ -121,10 +122,6 @@ def fetch_naver_trends(keyword_groups):
         print(f"[네이버 데이터랩] {e}")
         return {'results': []}
 
-
-# ==========================================
-# 유튜브 인기 급상승 (전체)
-# ==========================================
 def get_youtube_hype_trends():
     if not YOUTUBE_API_KEY: return [{"error": "YOUTUBE_API_KEY 환경변수 없음"}]
     url = (f"https://www.googleapis.com/youtube/v3/videos?part=snippet,statistics&chart=mostPopular&regionCode=KR&maxResults=10&key={YOUTUBE_API_KEY}")
@@ -146,10 +143,6 @@ def get_youtube_hype_trends():
         print(f"[유튜브] {e}")
         return [{"error": str(e)}]
 
-
-# ==========================================
-# 구글 트렌드 (GAS 프록시)
-# ==========================================
 def get_google_trends():
     if not GAS_PROXY_URL: return []
     try:
@@ -161,10 +154,6 @@ def get_google_trends():
         print(f"[구글 트렌드] {e}")
         return []
 
-
-# ==========================================
-# Last.fm 한국 음악 차트 트렌드
-# ==========================================
 def get_lastfm_trends():
     if not LASTFM_API_KEY: return [{"error": "LASTFM_API_KEY 환경변수 없음"}]
     url = f"http://ws.audioscrobbler.com/2.0/?method=geo.gettoptracks&country=south+korea&api_key={LASTFM_API_KEY}&format=json&limit=10"
@@ -190,71 +179,46 @@ def get_lastfm_trends():
 
 
 # ==========================================
-# 스팀
+# 🚀 스팀 (실시간 최고 인기/화제작 - 한국 기준)
 # ==========================================
-def _fetch_current_players(appid: str) -> int:
-    try:
-        url = f"https://api.steampowered.com/ISteamUserStats/GetNumberOfCurrentPlayers/v1/?appid={appid}"
-        data = json.loads(urllib.request.urlopen(urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'}), timeout=8).read().decode('utf-8'))
-        return int(data.get('response', {}).get('player_count', 0))
-    except Exception: return 0
-
-def _get_steam_names(appids: list) -> dict:
-    result = {}
-    def fetch_spy(appid):
-        try:
-            data = json.loads(urllib.request.urlopen(urllib.request.Request(f"https://steamspy.com/api.php?request=appdetails&appid={appid}", headers={'User-Agent': 'Mozilla/5.0'}), timeout=8).read().decode('utf-8'))
-            if data and data.get('name'): return appid, data['name']
-        except Exception: pass
-        return appid, None
-
-    with ThreadPoolExecutor(max_workers=5) as ex:
-        for appid, name in ex.map(fetch_spy, appids):
-            if name: result[appid] = name
-
-    missing = [a for a in appids if a not in result]
-    if missing:
-        try:
-            store = json.loads(urllib.request.urlopen(urllib.request.Request(f"https://store.steampowered.com/api/appdetails?appids={','.join(missing)}&cc=kr&l=korean&filters=basic", headers={'User-Agent': 'Mozilla/5.0'}), timeout=12).read().decode('utf-8'))
-            for appid in missing:
-                if store.get(appid, {}).get('success') and store.get(appid, {}).get('data', {}).get('name'): result[appid] = store[appid]['data']['name']
-        except Exception: pass
-    return result
-
 def get_steam_trends():
+    url = "https://store.steampowered.com/api/featuredcategories/?cc=kr&l=korean"
     try:
-        url  = "https://api.steampowered.com/ISteamChartsService/GetMostPlayedGames/v1/"
-        data = json.loads(urllib.request.urlopen(urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'}), timeout=10).read().decode('utf-8'))
-        ranks = data.get('response', {}).get('ranks', [])
-        if not ranks: return [{"error": "Steam 랭킹 데이터 없음"}]
-
-        top_10 = ranks[:10]
-        appids = [str(g['appid']) for g in top_10]
-
-        with ThreadPoolExecutor(max_workers=15) as ex:
-            names_future = ex.submit(_get_steam_names, appids)
-            player_futures = {ex.submit(_fetch_current_players, aid): aid for aid in appids}
-            names = names_future.result()
-            players = {aid: future.result() for future, aid in [(f, player_futures[f]) for f in as_completed(player_futures)]}
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        data = json.loads(urllib.request.urlopen(req, timeout=10).read().decode('utf-8'))
+        
+        top_sellers = data.get('top_sellers', {}).get('items', [])
+        if not top_sellers:
+            return [{"error": "Steam 화제작 데이터 없음"}]
 
         trends = []
-        for i, game in enumerate(top_10):
-            appid = str(game['appid'])
-            current = players.get(appid, 0)
+        for i, game in enumerate(top_sellers[:10]):
+            appid = str(game.get('id'))
+            
+            raw_price = game.get('final_price', 0)
+            real_price = int(raw_price / 100) if raw_price > 0 else 0
+            
+            if real_price == 0:
+                price_str = "무료"
+            else:
+                price_str = f"{real_price:,}원"
+                discount = game.get('discount_percent', 0)
+                if discount > 0:
+                    price_str += f" ({discount}% 할인🔥)"
+
             trends.append({
-                'rank': i + 1, 'keyword': names.get(appid) or f"App {appid}",
-                'concurrent_players': f"{current:,}" if current else "집계 중", 'peak_players': f"{int(game.get('peak_in_game') or 0):,}",
-                'image': f"https://cdn.cloudflare.steamstatic.com/steam/apps/{appid}/header.jpg", 'url': f"https://store.steampowered.com/app/{appid}/",
+                'rank': i + 1, 
+                'keyword': game.get('name'),
+                'price': price_str,
+                'image': game.get('header_image') or f"https://cdn.cloudflare.steamstatic.com/steam/apps/{appid}/header.jpg",
+                'url': f"https://store.steampowered.com/app/{appid}/",
             })
         return trends
     except Exception as e:
-        print(f"[Steam] {e}")
+        print(f"[Steam 화제작] {e}")
         return [{"error": f"Steam 오류: {str(e)}"}]
 
 
-# ==========================================
-# 깃허브
-# ==========================================
 def get_github_trends():
     try:
         last_week = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
@@ -268,10 +232,6 @@ def get_github_trends():
         print(f"[GitHub] {e}")
         return [{"error": str(e)}]
 
-
-# ==========================================
-# 업비트 (KRW 마켓 거래대금 순위)
-# ==========================================
 def get_upbit_trends():
     try:
         market_data = json.loads(urllib.request.urlopen(urllib.request.Request("https://api.upbit.com/v1/market/all?isDetails=false", headers={'Accept': 'application/json'}), timeout=10).read().decode('utf-8'))
@@ -295,10 +255,6 @@ def get_upbit_trends():
         print(f"[업비트] {e}")
         return [{"error": str(e)}]
 
-
-# ==========================================
-# 🟢 위키백과 한국어 인기 문서 (어제 기준)
-# ==========================================
 def get_wikipedia_trends():
     yesterday = datetime.now() - timedelta(days=1)
     url = f"https://wikimedia.org/api/rest_v1/metrics/pageviews/top/ko.wikipedia/all-access/{yesterday.strftime('%Y')}/{yesterday.strftime('%m')}/{yesterday.strftime('%d')}"
@@ -323,15 +279,9 @@ def get_wikipedia_trends():
         print(f"[위키백과] 오류: {e}")
         return [{"error": f"위키백과 연동 오류: {str(e)}"}]
 
-
-# ==========================================
-# 🟢 애니메이션 트렌드 (AniList + MAL 통합)
-# ==========================================
 def get_anime_trends():
     try:
         anime_scores, anime_details = {}, {}
-
-        # 1. AniList (GraphQL)
         query = """query { Page(page: 1, perPage: 15) { media(sort: TRENDING_DESC, type: ANIME) { title { romaji english } coverImage { large } siteUrl } } }"""
         res_ani = json.loads(urllib.request.urlopen(urllib.request.Request('https://graphql.anilist.co', data=json.dumps({'query': query}).encode('utf-8'), headers={'Content-Type': 'application/json'}), timeout=10).read().decode('utf-8'))
         
@@ -342,7 +292,6 @@ def get_anime_trends():
             anime_scores[norm_title] = 15 - i
             anime_details[norm_title] = {'keyword': title, 'title': title, 'image': anime.get('coverImage', {}).get('large', ''), 'url': anime.get('siteUrl', ''), 'sources': ['AniList']}
 
-        # 2. MyAnimeList (Jikan API)
         res_mal = json.loads(urllib.request.urlopen(urllib.request.Request('https://api.jikan.moe/v4/top/anime?filter=airing&limit=15', headers={'User-Agent': 'Mozilla/5.0 (NOWLY-Trend-Bot)'}), timeout=10).read().decode('utf-8'))
         
         for i, anime in enumerate(res_mal.get('data', [])):
@@ -366,12 +315,122 @@ def get_anime_trends():
 
 
 # ==========================================
-# API 라우트
+# 🚀 신규 추가된 API들 (영화, OTT, 핫플, 도서관, 책, 모바일게임)
+# ==========================================
+
+# 1. 영화진흥위원회 박스오피스
+def get_kofic_trends():
+    if not KOFIC_API_KEY: return [{"error": "KOFIC_API_KEY 없음"}]
+    yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y%m%d')
+    url = f"http://kobis.or.kr/kobisopenapi/webservice/rest/boxoffice/searchDailyBoxOfficeList.json?key={KOFIC_API_KEY}&targetDt={yesterday}"
+    try:
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        data = json.loads(urllib.request.urlopen(req, timeout=10).read().decode('utf-8'))
+        return [{
+            'rank': int(m['rank']), 'title': m['movieNm'], 
+            'audiCnt': f"{int(m['audiCnt']):,}명", 'audiAcc': f"{int(m['audiAcc']):,}명"
+        } for m in data.get('boxOfficeResult', {}).get('dailyBoxOfficeList', [])[:10]]
+    except Exception as e:
+        print(f"[영진위] {e}")
+        return [{"error": str(e)}]
+
+# 2. TMDB 넷플릭스/OTT 트렌드 (한국)
+def get_tmdb_trends():
+    if not TMDB_API_KEY: return [{"error": "TMDB_API_KEY 없음"}]
+    url = f"https://api.themoviedb.org/3/discover/tv?api_key={TMDB_API_KEY}&language=ko-KR&sort_by=popularity.desc&watch_region=KR&page=1"
+    try:
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        data = json.loads(urllib.request.urlopen(req, timeout=10).read().decode('utf-8'))
+        return [{
+            'rank': i+1, 'title': s.get('name') or s.get('original_name'), 
+            'overview': s.get('overview'), 
+            'poster': f"https://image.tmdb.org/t/p/w500{s.get('poster_path')}" if s.get('poster_path') else None
+        } for i, s in enumerate(data.get('results', [])[:10])]
+    except Exception as e:
+        print(f"[TMDB] {e}")
+        return [{"error": str(e)}]
+
+# 3. 서울 핫플 인구 혼잡도
+def get_seoul_trends():
+    if not SEOUL_API_KEY: return [{"error": "SEOUL_API_KEY 없음"}]
+    area_nm = urllib.parse.quote("홍대관광특구") # 기본값 홍대
+    url = f"http://openapi.seoul.go.kr:8088/{SEOUL_API_KEY}/json/citydata/1/5/{area_nm}"
+    try:
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        data = json.loads(urllib.request.urlopen(req, timeout=10).read().decode('utf-8'))
+        info = data.get('CITYDATA', {}).get('LIVE_PPLTN_STTS', [])[0]
+        return [{
+            'area': '홍대관광특구', 
+            'congest_lvl': info.get('AREA_CONGEST_LVL'), 
+            'congest_msg': info.get('AREA_CONGEST_MSG'), 
+            'ppltn_min': info.get('AREA_PPLTN_MIN'), 
+            'ppltn_max': info.get('AREA_PPLTN_MAX')
+        }]
+    except Exception as e:
+        print(f"[서울시] {e}")
+        return [{"error": str(e)}]
+
+# 4. 전국 도서관 인기 대출 순위 (정보나루 API)
+def get_library_trends():
+    if not LIBRARY_API_KEY: return [{"error": "LIBRARY_API_KEY 없음"}]
+    yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
+    url = f"http://data4library.kr/api/loanItemSrch?authKey={LIBRARY_API_KEY}&startDt={yesterday}&endDt={yesterday}&format=json"
+    try:
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        data = json.loads(urllib.request.urlopen(req, timeout=10).read().decode('utf-8'))
+        docs = data.get('response', {}).get('docs', [])
+        return [{
+            'rank': i+1, 'title': d['doc'].get('bookname'), 
+            'author': d['doc'].get('authors'), 
+            'image': d['doc'].get('bookImageURL')
+        } for i, d in enumerate(docs[:10])]
+    except Exception as e:
+        print(f"[도서관] {e}")
+        return [{"error": str(e)}]
+
+# 5. 알라딘 베스트셀러 (키 불필요! RSS 방식)
+def get_book_rss_trends():
+    url = "http://www.aladin.co.kr/rsscenter/go.aspx?rssType=1&type=Bestseller"
+    try:
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        xml_data = urllib.request.urlopen(req, timeout=10).read().decode('utf-8')
+        root = ET.fromstring(xml_data) # XML 파싱
+        items = root.findall('.//item')[:10]
+        
+        trends = []
+        for i, item in enumerate(items):
+            title = item.find('title').text if item.find('title') is not None else "제목 없음"
+            link = item.find('link').text if item.find('link') is not None else ""
+            trends.append({'rank': i+1, 'title': title, 'url': link})
+        return trends
+    except Exception as e:
+        print(f"[도서 RSS] {e}")
+        return [{"error": str(e)}]
+
+# 6. 한국 애플 앱스토어 무료 게임 Top 10 (키 불필요! JSON 방식)
+def get_apple_games_trends():
+    url = "https://rss.applemarketingtools.com/api/v2/kr/apps/top-free/10/apps.json"
+    try:
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        data = json.loads(urllib.request.urlopen(req, timeout=10).read().decode('utf-8'))
+        apps = data.get('feed', {}).get('results', [])
+        return [{
+            'rank': i+1, 'title': app.get('name'), 
+            'artist': app.get('artistName'), 
+            'image': app.get('artworkUrl100'), 
+            'url': app.get('url')
+        } for i, app in enumerate(apps)]
+    except Exception as e:
+        print(f"[애플 게임] {e}")
+        return [{"error": str(e)}]
+
+
+# ==========================================
+# 🚀 최종 API 라우트 통합
 # ==========================================
 @app.route('/trends', methods=['GET'])
 def get_trends():
     try:
-        # 네이버 트렌드는 실시간 검색어 수집 후 데이터랩을 찔러야 하므로, 래퍼 함수를 만들어 통째로 캐싱
         def fetch_naver_full():
             live_kw = get_realtime_keywords()
             r1 = fetch_naver_trends([{"groupName": kw, "keywords": [kw]} for kw in live_kw[:5]])
@@ -383,9 +442,9 @@ def get_trends():
                 'heat': min(int(item['data'][-1]['ratio']) if item.get('data') else 0, 100), 'sources': ['실시간검색어'],
             } for i, item in enumerate(all_results)]
 
-        # 모든 데이터를 get_cached_data 헬퍼 함수를 통해 호출 (10분 유지)
         return jsonify({
             'success': True,
+            # 기존 트렌드
             'data':    get_cached_data('naver', fetch_naver_full),
             'youtube': get_cached_data('youtube', get_youtube_hype_trends),
             'google':  get_cached_data('google', get_google_trends),
@@ -395,6 +454,15 @@ def get_trends():
             'upbit':   get_cached_data('upbit', get_upbit_trends),
             'wiki':    get_cached_data('wiki', get_wikipedia_trends),
             'anime':   get_cached_data('anime', get_anime_trends),
+            
+            # 🚀 신규 추가된 6가지 트렌드
+            'movie':   get_cached_data('kofic', get_kofic_trends),       # 영진위
+            'ott':     get_cached_data('tmdb', get_tmdb_trends),         # TMDB
+            'hotplace':get_cached_data('seoul', get_seoul_trends),       # 서울시 핫플
+            'library': get_cached_data('library', get_library_trends),   # 도서관
+            'books':   get_cached_data('books_rss', get_book_rss_trends),# 알라딘 RSS
+            'mobile_game': get_cached_data('apple_game', get_apple_games_trends), # 애플 앱스토어
+            
             'source':  'auto-trend',
         })
     except Exception as e:
@@ -405,23 +473,24 @@ def get_trends():
 @app.route('/health')
 def health(): return jsonify({'status': 'ok'})
 
-# 개별 디버그 라우트들도 전부 캐시를 타도록 수정해서 안전함!
+# 개별 디버그 라우트
 @app.route('/debug-naver')
 def debug_naver(): return jsonify({"success": True, "data": get_cached_data('naver', get_realtime_keywords)})
 @app.route('/debug-google')
 def debug_google(): return jsonify({"success": True, "data": get_cached_data('google', get_google_trends)})
-@app.route('/debug-music')
-def debug_music(): return jsonify({"success": True, "data": get_cached_data('music', get_lastfm_trends)})
-@app.route('/debug-steam')
-def debug_steam(): return jsonify({"success": True, "data": get_cached_data('steam', get_steam_trends)})
-@app.route('/debug-github')
-def debug_github(): return jsonify({"success": True, "data": get_cached_data('github', get_github_trends)})
-@app.route('/debug-upbit')
-def debug_upbit(): return jsonify({"success": True, "data": get_cached_data('upbit', get_upbit_trends)})
-@app.route('/debug-wiki')
-def debug_wiki(): return jsonify({"success": True, "data": get_cached_data('wiki', get_wikipedia_trends)})
-@app.route('/debug-anime')
-def debug_anime(): return jsonify({"success": True, "data": get_cached_data('anime', get_anime_trends)})
+@app.route('/debug-movie')
+def debug_movie(): return jsonify({"success": True, "data": get_cached_data('kofic', get_kofic_trends)})
+@app.route('/debug-ott')
+def debug_ott(): return jsonify({"success": True, "data": get_cached_data('tmdb', get_tmdb_trends)})
+@app.route('/debug-hotplace')
+def debug_hotplace(): return jsonify({"success": True, "data": get_cached_data('seoul', get_seoul_trends)})
+@app.route('/debug-library')
+def debug_library(): return jsonify({"success": True, "data": get_cached_data('library', get_library_trends)})
+@app.route('/debug-books')
+def debug_books(): return jsonify({"success": True, "data": get_cached_data('books_rss', get_book_rss_trends)})
+@app.route('/debug-mobile-game')
+def debug_mobile_game(): return jsonify({"success": True, "data": get_cached_data('apple_game', get_apple_games_trends)})
+
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8080, debug=False)
