@@ -12,6 +12,7 @@ import xml.etree.ElementTree as ET
 
 app = Flask(__name__)
 
+# CORS: 모든 출처 허용
 CORS(app, resources={r"/*": {
     "origins": "*",
     "allow_headers": ["Content-Type", "Authorization", "Accept"],
@@ -26,7 +27,7 @@ def after_request(response):
     return response
 
 # ==========================================
-# 🔐 환경 변수 
+# 🔐 환경 변수
 # ==========================================
 NAVER_CLIENT_ID     = os.environ.get('NAVER_CLIENT_ID', '')
 NAVER_CLIENT_SECRET = os.environ.get('NAVER_CLIENT_SECRET', '')
@@ -39,6 +40,7 @@ ALADIN_TTB_KEY      = os.environ.get('ALADIN_TTB_KEY', '')
 
 DEFAULT_KEYWORDS = ["환율", "날씨", "삼성전자", "이재명", "손흥민", "GPT", "아이유", "뉴진스", "비트코인", "넷플릭스"]
 
+# 🛡️ 봇 차단 방어벽 우회용 강력한 브라우저 헤더
 BROWSER_HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
@@ -46,10 +48,10 @@ BROWSER_HEADERS = {
 }
 
 # ==========================================
-# 🟢 자체 인메모리 캐시 시스템
+# 🟢 자체 인메모리 캐시 시스템 (서버 과부하 차단)
 # ==========================================
 CACHE = {}
-CACHE_TTL = 600
+CACHE_TTL = 600  # 10분 유지
 
 def get_cached_data(key, fetch_func, ttl=CACHE_TTL):
     now = time.time()
@@ -108,6 +110,16 @@ def get_google_news_trends():
             clean_title = re.sub(r'\s*[-|]\s*[^-|]+$', '', raw_title)
             trends.append({'rank': i+1, 'title': clean_title, 'url': item.find('link').text})
         return trends
+    except Exception as e: return [{"error": str(e)}]
+
+def get_google_trends():
+    if not GAS_PROXY_URL: return [{"error": "GAS_PROXY_URL 없음"}]
+    try:
+        resp = requests.get(GAS_PROXY_URL, timeout=15, headers={"Accept": "application/json"})
+        data = resp.json()
+        if data.get("status") == "ok":
+            return [{'rank': i+1, 'title': item.get('title'), 'url': item.get('url')} for i, item in enumerate(data.get("data", [])[:10])]
+        return []
     except Exception as e: return [{"error": str(e)}]
 
 def get_sbs_news_trends():
@@ -173,45 +185,47 @@ def get_coingecko_trends():
     except Exception as e: return [{"error": str(e)}]
 
 # ==========================================
-# 🎮 5. 게임 (애플 앱스토어 게임 필터링 적용)
+# 🎮 5. 게임 (안전한 필터링)
 # ==========================================
 def get_steam_trends():
     try: return [{'rank': i+1, 'title': g.get('name'), 'image': g.get('header_image')} for i, g in enumerate(requests.get("https://store.steampowered.com/api/featuredcategories/?cc=kr&l=korean", headers=BROWSER_HEADERS, timeout=10).json().get('top_sellers', {}).get('items', [])[:10])]
     except Exception as e: return [{"error": str(e)}]
 
-# [반영 완료] 애플 앱스토어: 전체 앱 50개를 불러와서 '게임'만 필터링 후 10개 추출
 def get_apple_games_trends():
-    url = "https://rss.applemarketingtools.com/api/v2/kr/apps/top-free/50/apps.json" # 50개 넉넉하게 호출
+    url = "https://rss.applemarketingtools.com/api/v2/kr/apps/top-free/50/apps.json"
     try:
         data = requests.get(url, headers=BROWSER_HEADERS, timeout=10).json()
         all_apps = data.get('feed', {}).get('results', [])
         
         game_list = []
         for app in all_apps:
-            # 장르(genres) 배열 안에서 이름 추출
-            genres = [g.get('name', '') for g in app.get('genres', [])]
-            # 장르에 'Games' 또는 '게임'이 포함된 경우만 리스트에 추가
-            if 'Games' in genres or '게임' in genres:
+            # 장르명과 장르ID를 안전하게 추출 (게임 장르 ID: 6014)
+            genres = [g.get('name', '').lower() for g in app.get('genres', [])]
+            genre_ids = [str(g.get('genreId', '')) for g in app.get('genres', [])]
+            
+            if 'games' in genres or '게임' in genres or '6014' in genre_ids:
                 game_list.append({
                     'title': app.get('name'),
                     'artist': app.get('artistName'),
                     'image': app.get('artworkUrl100'),
                     'url': app.get('url')
                 })
-            # 10개가 채워지면 루프 중단
             if len(game_list) >= 10:
                 break
                 
-        # 최종 순위(rank) 매기기
+        # 만약 게임 필터링이 아예 실패해서 빈 배열이 되면, 일반 앱 탑 10이라도 띄우도록 폴백(방어)
+        if not game_list:
+            game_list = [{'title': a.get('name'), 'artist': a.get('artistName'), 'image': a.get('artworkUrl100'), 'url': a.get('url')} for a in all_apps[:10]]
+
         for i, game in enumerate(game_list):
             game['rank'] = i + 1
             
         return game_list
     except Exception as e: 
-        return [{"error": str(e)}]
+        return [{"error": f"앱스토어 연동 오류: {str(e)}"}]
 
 # ==========================================
-# 🎬 6. 미디어, 도서 & 애니 (TMDB 애니메이션 추가)
+# 🎬 6. 미디어, 도서 & 애니 
 # ==========================================
 def get_kofic_trends():
     if not KOFIC_API_KEY: return [{"error": "KOFIC_API_KEY 설정 필요"}]
@@ -235,20 +249,19 @@ def get_aladin_official_trends():
         return [{'rank': i+1, 'title': item.get('title'), 'author': item.get('author', '').split(',')[0], 'image': item.get('cover'), 'url': item.get('link')} for i, item in enumerate(data.get('item', []))]
     except Exception as e: return [{"error": str(e)}]
 
-# [반영 완료] 애니메이션: 한국어 타이틀이 지원되는 TMDB '애니메이션' 장르(ID: 16) 호출
-def get_anime_korean_trends():
-    if not TMDB_API_KEY: return [{"error": "TMDB_API_KEY 설정 필요"}]
-    # with_genres=16 (애니메이션), with_original_language=ja (일본 애니 한정 시 추가 가능, 현재는 전체 애니)
-    url = f"https://api.themoviedb.org/3/discover/tv?api_key={TMDB_API_KEY}&language=ko-KR&sort_by=popularity.desc&watch_region=KR&with_genres=16&page=1"
+# [원상 복구] 애니리스트 공식 GraphQL API (무료/키 불필요)
+def get_anime_trends():
+    query = """query { Page(page: 1, perPage: 10) { media(sort: TRENDING_DESC, type: ANIME) { title { romaji english } coverImage { large } siteUrl } } }"""
     try:
-        data = requests.get(url, headers=BROWSER_HEADERS, timeout=10).json()
+        data = requests.post('https://graphql.anilist.co', json={'query': query}, timeout=10).json()
         return [{
             'rank': i+1, 
-            'title': s.get('name') or s.get('original_name'),
-            'image': f"https://image.tmdb.org/t/p/w200{s.get('poster_path')}" if s.get('poster_path') else None,
-            'url': f"https://www.themoviedb.org/tv/{s.get('id')}?language=ko-KR"
-        } for i, s in enumerate(data.get('results', [])[:10])]
-    except Exception as e: return [{"error": str(e)}]
+            'title': m['title'].get('english') or m['title'].get('romaji', '제목 없음'), 
+            'image': m['coverImage'].get('large'), 
+            'url': m['siteUrl']
+        } for i, m in enumerate(data.get('data', {}).get('Page', {}).get('media', []))]
+    except Exception as e: 
+        return [{"error": f"애니리스트 연동 오류: {str(e)}"}]
 
 # ==========================================
 # 🚀 최종 라우트 맵핑
@@ -268,6 +281,7 @@ def get_trends():
             'success': True,
             'data':          get_cached_data('naver', fetch_naver_full),
             'news_google':   get_cached_data('news_google', get_google_news_trends),
+            'trends_google': get_cached_data('trends_google', get_google_trends),
             'news_sbs':      get_cached_data('news_sbs', get_sbs_news_trends),
             
             'youtube_music': get_cached_data('youtube_music', get_youtube_music_trends),
@@ -281,12 +295,12 @@ def get_trends():
             'coingecko':     get_cached_data('coingecko', get_coingecko_trends),
             
             'steam':         get_cached_data('steam', get_steam_trends),
-            'mobile_game':   get_cached_data('apple_game', get_apple_games_trends), # 필터링 적용 완료
+            'mobile_game':   get_cached_data('apple_game', get_apple_games_trends),
             
             'movie':         get_cached_data('kofic', get_kofic_trends),
             'ott':           get_cached_data('tmdb', get_tmdb_trends),
             'books':         get_cached_data('books_official', get_aladin_official_trends),
-            'anime':         get_cached_data('anime_kr', get_anime_korean_trends) # 한국어 버전 애니 적용 완료
+            'anime':         get_cached_data('anime', get_anime_trends) # 롤백 적용 완료
         })
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
