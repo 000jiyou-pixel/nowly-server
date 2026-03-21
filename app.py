@@ -184,13 +184,13 @@ def get_coingecko_trends():
     except Exception as e: return [{"error": str(e)}]
 
 # ==========================================
-# 🎮 5. 게임 (Steam, 클래식 애플 앱스토어 장르 필터)
+# 🎮 5. 게임 (Steam, 애플 클래식 게임)
 # ==========================================
 def get_steam_trends():
     try: return [{'rank': i+1, 'title': g.get('name'), 'image': g.get('header_image')} for i, g in enumerate(requests.get("https://store.steampowered.com/api/featuredcategories/?cc=kr&l=korean", headers=BROWSER_HEADERS, timeout=10).json().get('top_sellers', {}).get('items', [])[:10])]
     except Exception as e: return [{"error": str(e)}]
 
-# [수정 완료] 애플 클래식 RSS API (genre=6014 설정으로 100% 게임만 호출)
+# [오류 해결] 리스트/딕셔너리 예외 완벽 대응
 def get_apple_games_trends():
     url = "https://itunes.apple.com/kr/rss/topfreeapplications/limit=10/genre=6014/json"
     try:
@@ -198,13 +198,35 @@ def get_apple_games_trends():
         entries = data.get('feed', {}).get('entry', [])
         if isinstance(entries, dict): entries = [entries] # 아이템이 1개일 경우 리스트화
         
-        return [{
-            'rank': i+1,
-            'title': item.get('im:name', {}).get('label', '제목 없음'),
-            'artist': item.get('im:artist', {}).get('label', ''),
-            'image': item.get('im:image', [{}])[-1].get('label', ''), # 제일 해상도 높은 이미지
-            'url': item.get('link', {}).get('attributes', {}).get('href', '') or item.get('id', {}).get('label', '')
-        } for i, item in enumerate(entries[:10])]
+        trends = []
+        for i, item in enumerate(entries[:10]):
+            # 1. URL 안전 추출
+            app_url = item.get('id', {}).get('label', '')
+            if not app_url:
+                link_data = item.get('link')
+                if isinstance(link_data, list) and len(link_data) > 0:
+                    app_url = link_data[0].get('attributes', {}).get('href', '')
+                elif isinstance(link_data, dict):
+                    app_url = link_data.get('attributes', {}).get('href', '')
+
+            # 2. 이미지 안전 추출
+            img_data = item.get('im:image')
+            img_url = ''
+            if isinstance(img_data, list) and len(img_data) > 0:
+                img_url = img_data[-1].get('label', '') # 가장 해상도 높은 마지막 이미지
+            elif isinstance(img_data, dict):
+                img_url = img_data.get('label', '')
+
+            # 3. 최종 데이터 조립
+            trends.append({
+                'rank': i+1,
+                'title': item.get('im:name', {}).get('label', '제목 없음'),
+                'artist': item.get('im:artist', {}).get('label', ''),
+                'image': img_url,
+                'url': app_url
+            })
+            
+        return trends
     except Exception as e: 
         return [{"error": f"앱스토어 연동 오류: {str(e)}"}]
 
@@ -227,7 +249,6 @@ def get_aladin_official_trends():
         return [{'rank': i+1, 'title': item.get('title'), 'author': item.get('author', '').split(',')[0], 'image': item.get('cover'), 'url': item.get('link')} for i, item in enumerate(data.get('item', []))]
     except Exception as e: return [{"error": str(e)}]
 
-# [원상 복구] 애니리스트 공식 GraphQL API (무료, 키 불필요)
 def get_anime_trends():
     query = """query { Page(page: 1, perPage: 10) { media(sort: TRENDING_DESC, type: ANIME) { title { romaji english } coverImage { large } siteUrl } } }"""
     try:
@@ -273,11 +294,11 @@ def get_trends():
             'coingecko':     get_cached_data('coingecko', get_coingecko_trends),
             
             'steam':         get_cached_data('steam', get_steam_trends),
-            'mobile_game':   get_cached_data('apple_game', get_apple_games_trends), # 고정된 클래식 게임 전용 API
+            'mobile_game':   get_cached_data('apple_game', get_apple_games_trends),
             
             'movie':         get_cached_data('kofic', get_kofic_trends),
             'books':         get_cached_data('books_official', get_aladin_official_trends),
-            'anime':         get_cached_data('anime', get_anime_trends) # 복구된 AniList API
+            'anime':         get_cached_data('anime', get_anime_trends)
         })
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
