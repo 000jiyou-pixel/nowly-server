@@ -27,7 +27,7 @@ def after_request(response):
     return response
 
 # ==========================================
-# 🔐 환경 변수
+# 🔐 환경 변수 설정
 # ==========================================
 NAVER_CLIENT_ID     = os.environ.get('NAVER_CLIENT_ID', '')
 NAVER_CLIENT_SECRET = os.environ.get('NAVER_CLIENT_SECRET', '')
@@ -35,12 +35,11 @@ YOUTUBE_API_KEY     = os.environ.get('YOUTUBE_API_KEY', '')
 GAS_PROXY_URL       = os.environ.get('GAS_PROXY_URL', '') 
 LASTFM_API_KEY      = os.environ.get('LASTFM_API_KEY', '')
 KOFIC_API_KEY       = os.environ.get('KOFIC_API_KEY', '')
-TMDB_API_KEY        = os.environ.get('TMDB_API_KEY', '')
 ALADIN_TTB_KEY      = os.environ.get('ALADIN_TTB_KEY', '')
 
 DEFAULT_KEYWORDS = ["환율", "날씨", "삼성전자", "이재명", "손흥민", "GPT", "아이유", "뉴진스", "비트코인", "넷플릭스"]
 
-# 🛡️ 봇 차단 방어벽 우회용 강력한 브라우저 헤더
+# 🛡️ 봇 차단 방어벽 우회용 브라우저 위장 헤더
 BROWSER_HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
@@ -48,7 +47,7 @@ BROWSER_HEADERS = {
 }
 
 # ==========================================
-# 🟢 자체 인메모리 캐시 시스템 (서버 과부하 차단)
+# 🟢 캐시 시스템 (서버 부하 방지)
 # ==========================================
 CACHE = {}
 CACHE_TTL = 600  # 10분 유지
@@ -71,7 +70,7 @@ def get_cached_data(key, fetch_func, ttl=CACHE_TTL):
     return data
 
 # ==========================================
-# 🔍 1. 종합 & 뉴스 
+# 🔍 1. 종합 & 뉴스 (네이버, 구글 뉴스, 구글 트렌드, SBS)
 # ==========================================
 def get_realtime_keywords():
     try:
@@ -130,7 +129,7 @@ def get_sbs_news_trends():
     except Exception as e: return [{"error": str(e)}]
 
 # ==========================================
-# 🎵 2. 오디오 & 음악
+# 🎵 2. 오디오 & 음악 (유튜브 뮤직, 애플뮤직, 팟캐스트)
 # ==========================================
 def get_youtube_music_trends():
     if not YOUTUBE_API_KEY: return [{"error": "YOUTUBE_API_KEY 없음"}]
@@ -152,7 +151,7 @@ def get_apple_podcast_trends():
     except Exception as e: return [{"error": str(e)}]
 
 # ==========================================
-# 💻 3. IT & 개발
+# 💻 3. IT & 개발 (GitHub, HackerNews)
 # ==========================================
 def get_github_trends():
     last_week = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
@@ -169,7 +168,7 @@ def get_hackernews_trends():
     except Exception as e: return [{"error": str(e)}]
 
 # ==========================================
-# 💰 4. 금융
+# 💰 4. 금융 (Upbit, CoinGecko)
 # ==========================================
 def get_upbit_trends():
     try:
@@ -185,59 +184,38 @@ def get_coingecko_trends():
     except Exception as e: return [{"error": str(e)}]
 
 # ==========================================
-# 🎮 5. 게임 (안전한 필터링)
+# 🎮 5. 게임 (Steam, 클래식 애플 앱스토어 장르 필터)
 # ==========================================
 def get_steam_trends():
     try: return [{'rank': i+1, 'title': g.get('name'), 'image': g.get('header_image')} for i, g in enumerate(requests.get("https://store.steampowered.com/api/featuredcategories/?cc=kr&l=korean", headers=BROWSER_HEADERS, timeout=10).json().get('top_sellers', {}).get('items', [])[:10])]
     except Exception as e: return [{"error": str(e)}]
 
+# [수정 완료] 애플 클래식 RSS API (genre=6014 설정으로 100% 게임만 호출)
 def get_apple_games_trends():
-    url = "https://rss.applemarketingtools.com/api/v2/kr/apps/top-free/50/apps.json"
+    url = "https://itunes.apple.com/kr/rss/topfreeapplications/limit=10/genre=6014/json"
     try:
         data = requests.get(url, headers=BROWSER_HEADERS, timeout=10).json()
-        all_apps = data.get('feed', {}).get('results', [])
+        entries = data.get('feed', {}).get('entry', [])
+        if isinstance(entries, dict): entries = [entries] # 아이템이 1개일 경우 리스트화
         
-        game_list = []
-        for app in all_apps:
-            # 장르명과 장르ID를 안전하게 추출 (게임 장르 ID: 6014)
-            genres = [g.get('name', '').lower() for g in app.get('genres', [])]
-            genre_ids = [str(g.get('genreId', '')) for g in app.get('genres', [])]
-            
-            if 'games' in genres or '게임' in genres or '6014' in genre_ids:
-                game_list.append({
-                    'title': app.get('name'),
-                    'artist': app.get('artistName'),
-                    'image': app.get('artworkUrl100'),
-                    'url': app.get('url')
-                })
-            if len(game_list) >= 10:
-                break
-                
-        # 만약 게임 필터링이 아예 실패해서 빈 배열이 되면, 일반 앱 탑 10이라도 띄우도록 폴백(방어)
-        if not game_list:
-            game_list = [{'title': a.get('name'), 'artist': a.get('artistName'), 'image': a.get('artworkUrl100'), 'url': a.get('url')} for a in all_apps[:10]]
-
-        for i, game in enumerate(game_list):
-            game['rank'] = i + 1
-            
-        return game_list
+        return [{
+            'rank': i+1,
+            'title': item.get('im:name', {}).get('label', '제목 없음'),
+            'artist': item.get('im:artist', {}).get('label', ''),
+            'image': item.get('im:image', [{}])[-1].get('label', ''), # 제일 해상도 높은 이미지
+            'url': item.get('link', {}).get('attributes', {}).get('href', '') or item.get('id', {}).get('label', '')
+        } for i, item in enumerate(entries[:10])]
     except Exception as e: 
         return [{"error": f"앱스토어 연동 오류: {str(e)}"}]
 
 # ==========================================
-# 🎬 6. 미디어, 도서 & 애니 
+# 🎬 6. 미디어, 도서 & 애니 (KOFIC, 알라딘 공식, AniList 복구)
 # ==========================================
 def get_kofic_trends():
     if not KOFIC_API_KEY: return [{"error": "KOFIC_API_KEY 설정 필요"}]
     yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y%m%d')
     url = f"http://kobis.or.kr/kobisopenapi/webservice/rest/boxoffice/searchDailyBoxOfficeList.json?key={KOFIC_API_KEY}&targetDt={yesterday}"
     try: return [{'rank': int(m['rank']), 'title': m['movieNm'], 'audiAcc': f"{int(m['audiAcc']):,}명"} for m in requests.get(url, headers=BROWSER_HEADERS, timeout=10).json().get('boxOfficeResult', {}).get('dailyBoxOfficeList', [])[:10]]
-    except Exception as e: return [{"error": str(e)}]
-
-def get_tmdb_trends():
-    if not TMDB_API_KEY: return [{"error": "TMDB_API_KEY 설정 필요"}]
-    url = f"https://api.themoviedb.org/3/discover/tv?api_key={TMDB_API_KEY}&language=ko-KR&sort_by=popularity.desc&watch_region=KR&page=1"
-    try: return [{'rank': i+1, 'title': s.get('name') or s.get('original_name')} for i, s in enumerate(requests.get(url, headers=BROWSER_HEADERS, timeout=10).json().get('results', [])[:10])]
     except Exception as e: return [{"error": str(e)}]
 
 def get_aladin_official_trends():
@@ -249,7 +227,7 @@ def get_aladin_official_trends():
         return [{'rank': i+1, 'title': item.get('title'), 'author': item.get('author', '').split(',')[0], 'image': item.get('cover'), 'url': item.get('link')} for i, item in enumerate(data.get('item', []))]
     except Exception as e: return [{"error": str(e)}]
 
-# [원상 복구] 애니리스트 공식 GraphQL API (무료/키 불필요)
+# [원상 복구] 애니리스트 공식 GraphQL API (무료, 키 불필요)
 def get_anime_trends():
     query = """query { Page(page: 1, perPage: 10) { media(sort: TRENDING_DESC, type: ANIME) { title { romaji english } coverImage { large } siteUrl } } }"""
     try:
@@ -295,12 +273,11 @@ def get_trends():
             'coingecko':     get_cached_data('coingecko', get_coingecko_trends),
             
             'steam':         get_cached_data('steam', get_steam_trends),
-            'mobile_game':   get_cached_data('apple_game', get_apple_games_trends),
+            'mobile_game':   get_cached_data('apple_game', get_apple_games_trends), # 고정된 클래식 게임 전용 API
             
             'movie':         get_cached_data('kofic', get_kofic_trends),
-            'ott':           get_cached_data('tmdb', get_tmdb_trends),
             'books':         get_cached_data('books_official', get_aladin_official_trends),
-            'anime':         get_cached_data('anime', get_anime_trends) # 롤백 적용 완료
+            'anime':         get_cached_data('anime', get_anime_trends) # 복구된 AniList API
         })
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
