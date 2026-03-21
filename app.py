@@ -12,7 +12,7 @@ import xml.etree.ElementTree as ET
 
 app = Flask(__name__)
 
-# CORS: 모든 출처 명시 허용
+# CORS: 모든 출처 허용
 CORS(app, resources={r"/*": {
     "origins": "*",
     "allow_headers": ["Content-Type", "Authorization", "Accept"],
@@ -27,55 +27,43 @@ def after_request(response):
     return response
 
 # ==========================================
-# 🔐 환경 변수 (TMDB 추가 완료)
+# 🔐 환경 변수 (알라딘 TTB 키 포함)
 # ==========================================
 NAVER_CLIENT_ID     = os.environ.get('NAVER_CLIENT_ID', '')
 NAVER_CLIENT_SECRET = os.environ.get('NAVER_CLIENT_SECRET', '')
 YOUTUBE_API_KEY     = os.environ.get('YOUTUBE_API_KEY', '')
-GAS_PROXY_URL       = os.environ.get('GAS_PROXY_URL', '')
+GAS_PROXY_URL       = os.environ.get('GAS_PROXY_URL', '') # 구글 트렌드 우회용 프록시
 LASTFM_API_KEY      = os.environ.get('LASTFM_API_KEY', '')
 KOFIC_API_KEY       = os.environ.get('KOFIC_API_KEY', '')
 TMDB_API_KEY        = os.environ.get('TMDB_API_KEY', '')
-LIBRARY_API_KEY     = os.environ.get('LIBRARY_API_KEY', '')
+ALADIN_TTB_KEY      = os.environ.get('ALADIN_TTB_KEY', '') # 알라딘 공식 Open API 키
 
 DEFAULT_KEYWORDS = ["환율", "날씨", "삼성전자", "이재명", "손흥민", "GPT", "아이유", "뉴진스", "비트코인", "넷플릭스"]
 
-# 🛡️ 강력한 브라우저 위장 헤더 (Velog, 알라딘 차단 우회용)
+# 🛡️ 봇 차단 방어벽 우회용 강력한 브라우저 헤더
 BROWSER_HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
     'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
-    'Sec-Ch-Ua': '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
-    'Sec-Ch-Ua-Mobile': '?0',
-    'Sec-Ch-Ua-Platform': '"Windows"',
-    'Sec-Fetch-Dest': 'document',
-    'Sec-Fetch-Mode': 'navigate',
-    'Sec-Fetch-Site': 'none',
-    'Sec-Fetch-User': '?1',
-    'Upgrade-Insecure-Requests': '1'
 }
 
 # ==========================================
-# 🟢 자체 인메모리 캐시 시스템
+# 🟢 자체 인메모리 캐시 시스템 (서버 과부하 차단)
 # ==========================================
 CACHE = {}
-CACHE_TTL = 600  # 10분
+CACHE_TTL = 600  # 10분 유지
 
 def get_cached_data(key, fetch_func, ttl=CACHE_TTL):
     now = time.time()
     cached = CACHE.get(key)
     
     if cached and (now - cached['time']) < ttl:
-        print(f"🟢 [Cache HIT] {key}")
         return cached['data']
         
-    print(f"🔴 [Cache MISS] {key} 데이터 새로 갱신 중...")
+    print(f"🔄 [{key}] 데이터 새로 갱신 중...")
     data = fetch_func()
     
-    is_error = False
-    if isinstance(data, list) and len(data) > 0 and 'error' in data[0]:
-        is_error = True
-        
+    is_error = isinstance(data, list) and len(data) > 0 and 'error' in data[0]
     CACHE[key] = {
         'data': data,
         'time': now if not is_error else now - ttl + 60 
@@ -83,7 +71,7 @@ def get_cached_data(key, fetch_func, ttl=CACHE_TTL):
     return data
 
 # ==========================================
-# 🛠️ 1. 검색 & 뉴스 API (네이버, 구글)
+# 🔍 1. 종합 & 뉴스 (네이버, 구글 뉴스, 구글 트렌드, SBS)
 # ==========================================
 def get_realtime_keywords():
     try:
@@ -99,7 +87,7 @@ def get_realtime_keywords():
                 if len(found) >= 10: break
             if len(found) >= 10: break
         return found[:10] if len(found) >= 5 else DEFAULT_KEYWORDS
-    except Exception as e: return DEFAULT_KEYWORDS
+    except: return DEFAULT_KEYWORDS
 
 def fetch_naver_trends(keyword_groups):
     if not keyword_groups: return {'results': []}
@@ -119,13 +107,30 @@ def get_google_news_trends():
         trends = []
         for i, item in enumerate(root.findall('.//item')[:10]):
             raw_title = item.find('title').text if item.find('title') is not None else "제목 없음"
-            clean_title = re.sub(r'\s*[-|]\s*[^-|]+$', '', raw_title)
+            clean_title = re.sub(r'\s*[-|]\s*[^-|]+$', '', raw_title) # 언론사 이름 제거
             trends.append({'rank': i+1, 'title': clean_title, 'url': item.find('link').text})
         return trends
     except Exception as e: return [{"error": str(e)}]
 
+def get_google_trends():
+    if not GAS_PROXY_URL: return [{"error": "GAS_PROXY_URL 없음"}]
+    try:
+        resp = requests.get(GAS_PROXY_URL, timeout=15, headers={"Accept": "application/json"})
+        data = resp.json()
+        if data.get("status") == "ok":
+            return [{'rank': i+1, 'title': item.get('title'), 'url': item.get('url')} for i, item in enumerate(data.get("data", [])[:10])]
+        return []
+    except Exception as e: return [{"error": str(e)}]
+
+def get_sbs_news_trends():
+    url = "https://news.sbs.co.kr/news/SectionRssFeed.do?sectionId=14"
+    try:
+        root = ET.fromstring(requests.get(url, headers=BROWSER_HEADERS, timeout=10).text)
+        return [{'rank': i+1, 'title': item.find('title').text, 'url': item.find('link').text} for i, item in enumerate(root.findall('.//item')[:10])]
+    except Exception as e: return [{"error": str(e)}]
+
 # ==========================================
-# 🎵 2. 오디오 & 음악 API (유튜브 뮤직, 애플 등)
+# 🎵 2. 오디오 & 음악 (유튜브 뮤직, 애플뮤직, 팟캐스트)
 # ==========================================
 def get_youtube_music_trends():
     if not YOUTUBE_API_KEY: return [{"error": "YOUTUBE_API_KEY 없음"}]
@@ -137,58 +142,45 @@ def get_youtube_music_trends():
     except Exception as e: return [{"error": str(e)}]
 
 def get_apple_music_trends():
-    try:
-        data = requests.get("https://rss.applemarketingtools.com/api/v2/kr/music/most-played/10/songs.json", headers=BROWSER_HEADERS, timeout=10).json()
-        return [{'rank': i+1, 'title': s['name'], 'artist': s['artistName'], 'image': s['artworkUrl100']} for i, s in enumerate(data.get('feed', {}).get('results', []))]
+    url = "https://rss.applemarketingtools.com/api/v2/kr/music/most-played/10/songs.json"
+    try: return [{'rank': i+1, 'title': s['name'], 'artist': s['artistName'], 'image': s['artworkUrl100']} for i, s in enumerate(requests.get(url, headers=BROWSER_HEADERS, timeout=10).json().get('feed', {}).get('results', []))]
     except Exception as e: return [{"error": str(e)}]
 
 def get_apple_podcast_trends():
-    try:
-        data = requests.get("https://rss.applemarketingtools.com/api/v2/kr/podcasts/top/10/podcasts.json", headers=BROWSER_HEADERS, timeout=10).json()
-        return [{'rank': i+1, 'title': p['name'], 'artist': p['artistName'], 'image': p['artworkUrl100']} for i, p in enumerate(data.get('feed', {}).get('results', []))]
+    url = "https://rss.applemarketingtools.com/api/v2/kr/podcasts/top/10/podcasts.json"
+    try: return [{'rank': i+1, 'title': p['name'], 'artist': p['artistName'], 'image': p['artworkUrl100']} for i, p in enumerate(requests.get(url, headers=BROWSER_HEADERS, timeout=10).json().get('feed', {}).get('results', []))]
     except Exception as e: return [{"error": str(e)}]
 
 # ==========================================
-# 💻 3. IT & 개발 API (Velog 우회 적용, 깃허브)
+# 💻 3. IT & 개발 (Velog, GitHub, HackerNews)
 # ==========================================
 def get_velog_trends():
     url = "https://v2.velog.io/graphql"
     query = """query TrendingPosts($limit: Int, $timeframe: String) { trendingPosts(limit: $limit, timeframe: $timeframe) { title user { username } url_slug } }"""
     headers = BROWSER_HEADERS.copy()
-    headers.update({
-        'Content-Type': 'application/json',
-        'Referer': 'https://velog.io/',
-        'Origin': 'https://velog.io'
-    })
+    headers.update({'Content-Type': 'application/json', 'Referer': 'https://velog.io/'})
     try:
         data = requests.post(url, json={"query": query, "variables": {"limit": 10, "timeframe": "week"}}, headers=headers, timeout=10).json()
-        if not data.get('data', {}).get('trendingPosts'):
-            return [{"error": "Velog 서버에서 IP 접근을 차단했습니다."}]
+        if not data.get('data', {}).get('trendingPosts'): return [{"error": "Velog IP 차단됨"}]
         return [{'rank': i+1, 'title': p['title'], 'author': p['user']['username'], 'url': f"https://velog.io/@{p['user']['username']}/{p['url_slug']}"} for i, p in enumerate(data.get('data', {}).get('trendingPosts', []))]
     except Exception as e: return [{"error": str(e)}]
 
 def get_github_trends():
-    try:
-        last_week = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
-        url  = f"https://api.github.com/search/repositories?q=created:>{last_week}&sort=stars&order=desc&per_page=10"
-        headers = BROWSER_HEADERS.copy()
-        headers['Accept'] = 'application/vnd.github.v3+json'
-        data = requests.get(url, headers=headers, timeout=10).json()
-        return [{'rank': i + 1, 'keyword': item.get('full_name', ''), 'description': item.get('description') or '설명 없음', 'url': item.get('html_url', '')} for i, item in enumerate(data.get('items', []))]
+    last_week = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
+    url = f"https://api.github.com/search/repositories?q=created:>{last_week}&sort=stars&order=desc&per_page=10"
+    headers = BROWSER_HEADERS.copy()
+    headers['Accept'] = 'application/vnd.github.v3+json'
+    try: return [{'rank': i+1, 'keyword': item.get('full_name', ''), 'description': item.get('description') or '설명 없음', 'url': item.get('html_url', '')} for i, item in enumerate(requests.get(url, headers=headers, timeout=10).json().get('items', []))]
     except Exception as e: return [{"error": str(e)}]
 
 def get_hackernews_trends():
     try:
         ids = requests.get("https://hacker-news.firebaseio.com/v0/topstories.json", headers=BROWSER_HEADERS, timeout=10).json()[:10]
-        trends = []
-        for i, sid in enumerate(ids):
-            item = requests.get(f"https://hacker-news.firebaseio.com/v0/item/{sid}.json", headers=BROWSER_HEADERS, timeout=5).json()
-            trends.append({'rank': i+1, 'title': item.get('title'), 'url': item.get('url')})
-        return trends
+        return [{'rank': i+1, 'title': requests.get(f"https://hacker-news.firebaseio.com/v0/item/{sid}.json", headers=BROWSER_HEADERS, timeout=5).json().get('title'), 'url': f"https://news.ycombinator.com/item?id={sid}"} for i, sid in enumerate(ids)]
     except Exception as e: return [{"error": str(e)}]
 
 # ==========================================
-# 💰 4. 금융 API (업비트, 코인게코)
+# 💰 4. 금융 (Upbit, CoinGecko)
 # ==========================================
 def get_upbit_trends():
     try:
@@ -200,67 +192,55 @@ def get_upbit_trends():
     except Exception as e: return [{"error": str(e)}]
 
 def get_coingecko_trends():
-    try:
-        data = requests.get("https://api.coingecko.com/api/v3/search/trending", headers=BROWSER_HEADERS, timeout=10).json()
-        return [{'rank': i+1, 'title': c['item']['name'], 'symbol': c['item']['symbol'], 'image': c['item']['small']} for i, c in enumerate(data.get('coins', [])[:10])]
+    try: return [{'rank': i+1, 'title': c['item']['name'], 'symbol': c['item']['symbol'], 'image': c['item']['small']} for i, c in enumerate(requests.get("https://api.coingecko.com/api/v3/search/trending", headers=BROWSER_HEADERS, timeout=10).json().get('coins', [])[:10])]
     except Exception as e: return [{"error": str(e)}]
 
 # ==========================================
-# 🎮 5. 게임 API (스팀, 앱스토어)
+# 🎮 5. 게임 (Steam, AppStore)
 # ==========================================
 def get_steam_trends():
-    url = "https://store.steampowered.com/api/featuredcategories/?cc=kr&l=korean"
-    try:
-        data = requests.get(url, headers=BROWSER_HEADERS, timeout=10).json()
-        return [{'rank': i+1, 'title': g.get('name'), 'image': g.get('header_image')} for i, g in enumerate(data.get('top_sellers', {}).get('items', [])[:10])]
+    try: return [{'rank': i+1, 'title': g.get('name'), 'image': g.get('header_image')} for i, g in enumerate(requests.get("https://store.steampowered.com/api/featuredcategories/?cc=kr&l=korean", headers=BROWSER_HEADERS, timeout=10).json().get('top_sellers', {}).get('items', [])[:10])]
     except Exception as e: return [{"error": str(e)}]
 
 def get_apple_games_trends():
-    url = "https://rss.applemarketingtools.com/api/v2/kr/apps/top-free/10/apps.json"
-    try:
-        data = requests.get(url, headers=BROWSER_HEADERS, timeout=10).json()
-        return [{'rank': i+1, 'title': app.get('name'), 'artist': app.get('artistName'), 'image': app.get('artworkUrl100'), 'url': app.get('url')} for i, app in enumerate(data.get('feed', {}).get('results', []))]
+    try: return [{'rank': i+1, 'title': app.get('name'), 'artist': app.get('artistName'), 'image': app.get('artworkUrl100'), 'url': app.get('url')} for i, app in enumerate(requests.get("https://rss.applemarketingtools.com/api/v2/kr/apps/top-free/10/apps.json", headers=BROWSER_HEADERS, timeout=10).json().get('feed', {}).get('results', []))]
     except Exception as e: return [{"error": str(e)}]
 
 # ==========================================
-# 🎬 6. 미디어 & 도서 API (영화, TMDB 추가, 알라딘 우회)
+# 🎬 6. 미디어, 도서 & 애니 (KOFIC, TMDB, 알라딘 TTB, AniList)
 # ==========================================
 def get_kofic_trends():
-    if not KOFIC_API_KEY: return [{"error": "KOFIC_API_KEY 확인 필요"}]
+    if not KOFIC_API_KEY: return [{"error": "KOFIC_API_KEY 설정 필요"}]
     yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y%m%d')
     url = f"http://kobis.or.kr/kobisopenapi/webservice/rest/boxoffice/searchDailyBoxOfficeList.json?key={KOFIC_API_KEY}&targetDt={yesterday}"
-    try:
-        data = requests.get(url, headers=BROWSER_HEADERS, timeout=10).json()
-        return [{'rank': int(m['rank']), 'title': m['movieNm'], 'audiAcc': f"{int(m['audiAcc']):,}명"} for m in data.get('boxOfficeResult', {}).get('dailyBoxOfficeList', [])[:10]]
+    try: return [{'rank': int(m['rank']), 'title': m['movieNm'], 'audiAcc': f"{int(m['audiAcc']):,}명"} for m in requests.get(url, headers=BROWSER_HEADERS, timeout=10).json().get('boxOfficeResult', {}).get('dailyBoxOfficeList', [])[:10]]
     except Exception as e: return [{"error": str(e)}]
 
 def get_tmdb_trends():
-    if not TMDB_API_KEY: return [{"error": "TMDB_API_KEY 확인 필요"}]
+    if not TMDB_API_KEY: return [{"error": "TMDB_API_KEY 설정 필요"}]
     url = f"https://api.themoviedb.org/3/discover/tv?api_key={TMDB_API_KEY}&language=ko-KR&sort_by=popularity.desc&watch_region=KR&page=1"
-    try:
-        data = requests.get(url, headers=BROWSER_HEADERS, timeout=10).json()
-        return [{'rank': i+1, 'title': s.get('name') or s.get('original_name')} for i, s in enumerate(data.get('results', [])[:10])]
+    try: return [{'rank': i+1, 'title': s.get('name') or s.get('original_name')} for i, s in enumerate(requests.get(url, headers=BROWSER_HEADERS, timeout=10).json().get('results', [])[:10])]
     except Exception as e: return [{"error": str(e)}]
 
-def get_book_rss_trends():
-    url = "http://www.aladin.co.kr/rsscenter/go.aspx?rssType=1&type=Bestseller"
+def get_aladin_official_trends():
+    if not ALADIN_TTB_KEY: return [{"error": "ALADIN_TTB_KEY 환경변수 설정 필요"}]
+    url = f"http://www.aladin.co.kr/ttb/api/ItemList.aspx?ttbkey={ALADIN_TTB_KEY}&QueryType=Bestseller&MaxResults=10&start=1&SearchTarget=Book&output=js&Version=20131101"
     try:
-        # 알라딘 봇 차단 대응용 세션 생성
-        session = requests.Session()
-        session.headers.update(BROWSER_HEADERS)
-        resp = session.get(url, timeout=10)
-        resp.encoding = 'utf-8'
-        
-        root = ET.fromstring(resp.text)
-        items = root.findall('.//item')[:10]
-        if not items:
-            return [{"error": "알라딘 서버에서 IP 접근을 차단했습니다."}]
-            
-        return [{'rank': i+1, 'title': item.find('title').text, 'url': item.find('link').text} for i, item in enumerate(items)]
+        data = requests.get(url, timeout=10).json()
+        if 'item' not in data: return [{"error": "알라딘 API 응답 실패"}]
+        return [{'rank': i+1, 'title': item.get('title'), 'author': item.get('author', '').split(',')[0], 'image': item.get('cover'), 'url': item.get('link')} for i, item in enumerate(data.get('item', []))]
+    except Exception as e: return [{"error": str(e)}]
+
+# [추가] 키 발급 불필요, 100% 무료 공식 GraphQL 기반 애니메이션/만화 트렌드
+def get_anime_trends():
+    query = """query { Page(page: 1, perPage: 10) { media(sort: TRENDING_DESC, type: ANIME) { title { romaji english } coverImage { large } siteUrl } } }"""
+    try:
+        data = requests.post('https://graphql.anilist.co', json={'query': query}, timeout=10).json()
+        return [{'rank': i+1, 'title': m['title'].get('english') or m['title'].get('romaji', '제목 없음'), 'image': m['coverImage'].get('large'), 'url': m['siteUrl']} for i, m in enumerate(data.get('data', {}).get('Page', {}).get('media', []))]
     except Exception as e: return [{"error": str(e)}]
 
 # ==========================================
-# 🚀 최종 라우트 통합
+# 🚀 최종 라우트 맵핑
 # ==========================================
 @app.route('/trends', methods=['GET'])
 def get_trends():
@@ -275,26 +255,30 @@ def get_trends():
 
         return jsonify({
             'success': True,
+            # 종합/뉴스
             'data':          get_cached_data('naver', fetch_naver_full),
             'news_google':   get_cached_data('news_google', get_google_news_trends),
-            
+            'trends_google': get_cached_data('trends_google', get_google_trends), # GAS 프록시 복구
+            'news_sbs':      get_cached_data('news_sbs', get_sbs_news_trends),
+            # 음악
             'youtube_music': get_cached_data('youtube_music', get_youtube_music_trends),
             'music_apple':   get_cached_data('music_apple', get_apple_music_trends),
             'podcast':       get_cached_data('podcast', get_apple_podcast_trends),
-            
+            # IT/개발
             'velog':         get_cached_data('velog', get_velog_trends),
             'github':        get_cached_data('github', get_github_trends),
             'hackernews':    get_cached_data('hackernews', get_hackernews_trends),
-            
+            # 가상화폐
             'upbit':         get_cached_data('upbit', get_upbit_trends),
             'coingecko':     get_cached_data('coingecko', get_coingecko_trends),
-            
+            # 게임
             'steam':         get_cached_data('steam', get_steam_trends),
             'mobile_game':   get_cached_data('apple_game', get_apple_games_trends),
-            
+            # 미디어/문화 (애니메이션 추가)
             'movie':         get_cached_data('kofic', get_kofic_trends),
-            'ott':           get_cached_data('tmdb', get_tmdb_trends), # TMDB 연동 완료
-            'books':         get_cached_data('books_rss', get_book_rss_trends),
+            'ott':           get_cached_data('tmdb', get_tmdb_trends),
+            'books':         get_cached_data('books_official', get_aladin_official_trends),
+            'anime':         get_cached_data('anime', get_anime_trends) # 신규 추가 완료
         })
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
