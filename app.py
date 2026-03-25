@@ -251,6 +251,12 @@ def get_anime_trends():
 # ==========================================
 # 🚀 최종 라우트 맵핑
 # ==========================================
+
+# ⭐ 새로 추가된 '대문' 라우트 ⭐
+@app.route('/')
+def home():
+    return "<h1>Now.ly 백엔드 서버가 쌩쌩하게 잘 돌아가고 있습니다! 🎉</h1><p>프론트엔드 연동을 위한 진짜 주소는 주소창 끝에 <b>/trends</b> 를 붙이셔야 합니다.</p>"
+
 @app.route('/trends', methods=['GET'])
 def get_trends():
     try:
@@ -266,7 +272,6 @@ def get_trends():
             'success': True,
             'data':          get_cached_data('naver', fetch_naver_full),
             'news_google':   get_cached_data('news_google', get_google_news_trends),
-            # 구글 트렌드 완전 삭제 완료
             'news_sbs':      get_cached_data('news_sbs', get_sbs_news_trends),
             
             'youtube_music': get_cached_data('youtube_music', get_youtube_music_trends),
