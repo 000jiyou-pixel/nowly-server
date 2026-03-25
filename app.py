@@ -9,7 +9,6 @@ import requests
 import time
 from datetime import datetime, timedelta
 import xml.etree.ElementTree as ET
-import feedparser  # 👈 구글 트렌드 RSS 파싱을 위해 새로 추가됨
 
 app = Flask(__name__)
 
@@ -33,7 +32,6 @@ def after_request(response):
 NAVER_CLIENT_ID     = os.environ.get('NAVER_CLIENT_ID', '')
 NAVER_CLIENT_SECRET = os.environ.get('NAVER_CLIENT_SECRET', '')
 YOUTUBE_API_KEY     = os.environ.get('YOUTUBE_API_KEY', '')
-# GAS_PROXY_URL은 이제 구글 트렌드에서 사용하지 않으므로 비워두셔도 됩니다.
 GAS_PROXY_URL       = os.environ.get('GAS_PROXY_URL', '') 
 LASTFM_API_KEY      = os.environ.get('LASTFM_API_KEY', '')
 KOFIC_API_KEY       = os.environ.get('KOFIC_API_KEY', '')
@@ -72,7 +70,7 @@ def get_cached_data(key, fetch_func, ttl=CACHE_TTL):
     return data
 
 # ==========================================
-# 🔍 1. 종합 & 뉴스 (네이버, 구글 뉴스, 구글 트렌드, SBS)
+# 🔍 1. 종합 & 뉴스 (네이버, 구글 뉴스, SBS)
 # ==========================================
 def get_realtime_keywords():
     try:
@@ -112,29 +110,6 @@ def get_google_news_trends():
             trends.append({'rank': i+1, 'title': clean_title, 'url': item.find('link').text})
         return trends
     except Exception as e: return [{"error": str(e)}]
-
-# 🌟 [수정된 부분] 방향 1 적용: 구글 트렌드 RSS 직접 호출 🌟
-def get_google_trends():
-    url = 'https://trends.google.com/trending/rss?geo=KR'
-    try:
-        # 기존에 설정해둔 BROWSER_HEADERS (User-Agent 포함)를 활용해 403 에러 우회
-        resp = requests.get(url, headers=BROWSER_HEADERS, timeout=10)
-        resp.raise_for_status()
-        
-        # feedparser를 사용해 RSS XML 데이터를 쉽게 파싱
-        feed = feedparser.parse(resp.content)
-        
-        trends = []
-        for i, entry in enumerate(feed.entries[:10]):
-            trends.append({
-                'rank': i + 1,
-                'title': entry.title,
-                'url': entry.link,
-                'traffic': entry.get('ht_approx_traffic', '알 수 없음') # 검색량 데이터 포함
-            })
-        return trends
-    except Exception as e: 
-        return [{"error": f"구글 트렌드 연동 오류: {str(e)}"}]
 
 def get_sbs_news_trends():
     url = "https://news.sbs.co.kr/news/SectionRssFeed.do?sectionId=14"
@@ -291,7 +266,7 @@ def get_trends():
             'success': True,
             'data':          get_cached_data('naver', fetch_naver_full),
             'news_google':   get_cached_data('news_google', get_google_news_trends),
-            'trends_google': get_cached_data('trends_google', get_google_trends), # 👈 업데이트된 함수 사용
+            # 구글 트렌드 완전 삭제 완료
             'news_sbs':      get_cached_data('news_sbs', get_sbs_news_trends),
             
             'youtube_music': get_cached_data('youtube_music', get_youtube_music_trends),
