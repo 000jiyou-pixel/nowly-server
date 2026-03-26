@@ -7,315 +7,215 @@ import os
 import re
 import requests
 import time
-import concurrent.futures  # 🚀 병렬 처리를 위한 모듈 추가 (내장 모듈)
+import concurrent.futures
+import threading
 from datetime import datetime, timedelta
 import xml.etree.ElementTree as ET
 
 app = Flask(__name__)
-
-# CORS: 모든 출처 허용 (불필요한 after_request 중복 제거)
-CORS(app, resources={r"/*": {
-    "origins": "*",
-    "allow_headers": ["Content-Type", "Authorization", "Accept"],
-    "methods": ["GET", "POST", "OPTIONS"]
-}})
+CORS(app, resources={r"/*": {"origins": "*"}})
 
 # ==========================================
-# 🔐 환경 변수 설정
+# 🔐 환경 변수 & 기본 설정
 # ==========================================
 NAVER_CLIENT_ID     = os.environ.get('NAVER_CLIENT_ID', '')
 NAVER_CLIENT_SECRET = os.environ.get('NAVER_CLIENT_SECRET', '')
 YOUTUBE_API_KEY     = os.environ.get('YOUTUBE_API_KEY', '')
-GAS_PROXY_URL       = os.environ.get('GAS_PROXY_URL', '') 
-LASTFM_API_KEY      = os.environ.get('LASTFM_API_KEY', '')
 KOFIC_API_KEY       = os.environ.get('KOFIC_API_KEY', '')
 ALADIN_TTB_KEY      = os.environ.get('ALADIN_TTB_KEY', '')
 
 DEFAULT_KEYWORDS = ["환율", "날씨", "삼성전자", "이재명", "손흥민", "GPT", "아이유", "뉴진스", "비트코인", "넷플릭스"]
-
-# 🛡️ 봇 차단 방어벽 우회용 브라우저 위장 헤더
 BROWSER_HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-    'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
 }
 
 # ==========================================
-# 🟢 개선된 캐시 시스템 (빈 데이터 방어 추가)
+# ⚡ 초고속 SWR 캐싱 시스템 (0.1초 응답의 핵심)
 # ==========================================
 CACHE = {}
-CACHE_TTL = 600  # 10분 유지
+CACHE_TTL = 300  # 5분마다 백그라운드 갱신
+executor = concurrent.futures.ThreadPoolExecutor(max_workers=20)
 
-def get_cached_data(key, fetch_func, ttl=CACHE_TTL):
+def background_fetch_task(key, fetch_func):
+    """사용자 모르게 뒤에서 데이터를 갱신하는 암살자 함수"""
+    try:
+        data = fetch_func()
+        is_error = isinstance(data, list) and (len(data) == 0 or 'error' in data[0])
+        
+        if not is_error:
+            CACHE[key] = {'data': data, 'time': time.time(), 'fetching': False}
+        else:
+            if key in CACHE:
+                CACHE[key]['fetching'] = False
+                CACHE[key]['time'] = time.time() - CACHE_TTL + 60 # 에러 시 1분 뒤 재시도
+    except Exception as e:
+        print(f"[{key}] 갱신 실패: {e}")
+        if key in CACHE: CACHE[key]['fetching'] = False
+
+def get_swr_data(key, fetch_func):
+    """캐시가 있으면 즉시 반환하고, 낡았으면 뒤에서 몰래 갱신시킴"""
     now = time.time()
     cached = CACHE.get(key)
     
-    if cached and (now - cached['time']) < ttl:
+    if cached:
+        # 데이터가 있고, TTL이 지났고, 현재 갱신 중이 아니라면 백그라운드 갱신 시작
+        if (now - cached['time']) > CACHE_TTL and not cached.get('fetching'):
+            CACHE[key]['fetching'] = True
+            executor.submit(background_fetch_task, key, fetch_func)
         return cached['data']
-        
-    print(f"🔄 [{key}] 데이터 새로 갱신 중...")
-    data = fetch_func()
-    
-    # 💡 개선: 빈 리스트([])이거나 에러 키가 포함된 경우를 더 정확히 캐치
-    is_error = False
-    if isinstance(data, list):
-        if len(data) == 0 or (len(data) > 0 and 'error' in data[0]):
-            is_error = True
-    elif isinstance(data, dict) and 'error' in data:
-        is_error = True
-
-    # 정상 데이터면 10분 캐시, 에러/빈 데이터면 1분 뒤 재시도하도록 설정
-    CACHE[key] = {
-        'data': data,
-        'time': now if not is_error else now - ttl + 60 
-    }
-    return data
+    else:
+        # 최초 접속 시: 기다리게 하지 않고 '로딩 중' 상태를 즉시 반환
+        CACHE[key] = {
+            'data': [{"status": "loading", "title": "🔥 데이터를 실시간으로 불러오는 중입니다...", "rank": "-"}], 
+            'time': 0, 
+            'fetching': True
+        }
+        executor.submit(background_fetch_task, key, fetch_func)
+        return CACHE[key]['data']
 
 # ==========================================
-# 🔍 1. 종합 & 뉴스 (네이버, 구글 뉴스, SBS)
+# 🔍 API 수집 함수들 (Timeout 5초로 단축, 병렬화)
 # ==========================================
-def get_realtime_keywords():
+def get_naver_full_trends():
     try:
-        found, stop = [], {'기자','뉴스','속보','오늘','지금','최근','관련','발표','대한','이후','이번','지난'}
-        for q in ["실시간검색어", "급상승", "오늘뉴스"]:
-            url = f"https://openapi.naver.com/v1/search/news.json?query={urllib.parse.quote(q)}&display=20&sort=date"
+        found, stop = [], {'기자','뉴스','속보','오늘','지금'}
+        for q in ["실시간검색어", "급상승"]:
+            url = f"https://openapi.naver.com/v1/search/news.json?query={urllib.parse.quote(q)}&display=20"
             req = urllib.request.Request(url, headers={'X-Naver-Client-Id': NAVER_CLIENT_ID, 'X-Naver-Client-Secret': NAVER_CLIENT_SECRET})
-            data = json.loads(urllib.request.urlopen(req, timeout=10).read().decode('utf-8'))
+            data = json.loads(urllib.request.urlopen(req, timeout=5).read().decode('utf-8'))
             for item in data.get('items', []):
                 title = re.sub(r'<[^>]+>', '', item.get('title', ''))
                 for w in re.findall(r'[가-힣]{2,6}', title):
                     if w not in found and w not in stop: found.append(w)
-                if len(found) >= 10: break
-            if len(found) >= 10: break
-        return found[:10] if len(found) >= 5 else DEFAULT_KEYWORDS
-    except: return DEFAULT_KEYWORDS
-
-def fetch_naver_trends(keyword_groups):
-    if not keyword_groups: return {'results': []}
-    end_date = datetime.now().strftime('%Y-%m-%d')
-    start_date = (datetime.now() - timedelta(days=3)).strftime('%Y-%m-%d')
-    body = json.dumps({"startDate": start_date, "endDate": end_date, "timeUnit": "date", "keywordGroups": keyword_groups}).encode('utf-8')
-    try:
-        req = urllib.request.Request("https://openapi.naver.com/v1/datalab/search", data=body, method='POST', headers={'X-Naver-Client-Id': NAVER_CLIENT_ID, 'X-Naver-Client-Secret': NAVER_CLIENT_SECRET, 'Content-Type': 'application/json'})
-        return json.loads(urllib.request.urlopen(req, timeout=10).read().decode('utf-8'))
-    except: return {'results': []}
+        live_kw = found[:10] if len(found) >= 5 else DEFAULT_KEYWORDS
+        
+        end_date = datetime.now().strftime('%Y-%m-%d')
+        start_date = (datetime.now() - timedelta(days=3)).strftime('%Y-%m-%d')
+        def fetch_trends(kw_list):
+            body = json.dumps({"startDate": start_date, "endDate": end_date, "timeUnit": "date", "keywordGroups": [{"groupName": k, "keywords": [k]} for k in kw_list]}).encode('utf-8')
+            req = urllib.request.Request("https://openapi.naver.com/v1/datalab/search", data=body, method='POST', headers={'X-Naver-Client-Id': NAVER_CLIENT_ID, 'X-Naver-Client-Secret': NAVER_CLIENT_SECRET, 'Content-Type': 'application/json'})
+            return json.loads(urllib.request.urlopen(req, timeout=5).read().decode('utf-8')).get('results', [])
+        
+        all_results = fetch_trends(live_kw[:5]) + fetch_trends(live_kw[5:])
+        all_results.sort(key=lambda x: x['data'][-1]['ratio'] if x.get('data') else 0, reverse=True)
+        return [{'rank': i+1, 'keyword': item['title']} for i, item in enumerate(all_results)]
+    except: return [{"rank": i+1, "keyword": kw} for i, kw in enumerate(DEFAULT_KEYWORDS)]
 
 def get_google_news_trends():
-    url = "https://news.google.com/rss?hl=ko&gl=KR&ceid=KR:ko"
     try:
-        resp = requests.get(url, headers=BROWSER_HEADERS, timeout=10)
+        resp = requests.get("https://news.google.com/rss?hl=ko&gl=KR&ceid=KR:ko", headers=BROWSER_HEADERS, timeout=5)
         root = ET.fromstring(resp.text)
-        trends = []
-        for i, item in enumerate(root.findall('.//item')[:10]):
-            raw_title = item.find('title').text if item.find('title') is not None else "제목 없음"
-            clean_title = re.sub(r'\s*[-|]\s*[^-|]+$', '', raw_title)
-            trends.append({'rank': i+1, 'title': clean_title, 'url': item.find('link').text})
-        return trends
+        return [{'rank': i+1, 'title': re.sub(r'\s*[-|]\s*[^-|]+$', '', item.find('title').text), 'url': item.find('link').text} for i, item in enumerate(root.findall('.//item')[:10])]
     except Exception as e: return [{"error": str(e)}]
 
 def get_sbs_news_trends():
-    url = "https://news.sbs.co.kr/news/SectionRssFeed.do?sectionId=14"
     try:
-        root = ET.fromstring(requests.get(url, headers=BROWSER_HEADERS, timeout=10).text)
+        root = ET.fromstring(requests.get("https://news.sbs.co.kr/news/SectionRssFeed.do?sectionId=14", headers=BROWSER_HEADERS, timeout=5).text)
         return [{'rank': i+1, 'title': item.find('title').text, 'url': item.find('link').text} for i, item in enumerate(root.findall('.//item')[:10])]
     except Exception as e: return [{"error": str(e)}]
 
-# ==========================================
-# 🎵 2. 오디오 & 음악 (유튜브 뮤직, 애플뮤직, 팟캐스트)
-# ==========================================
 def get_youtube_music_trends():
-    if not YOUTUBE_API_KEY: return [{"error": "YOUTUBE_API_KEY 없음"}]
-    url = f"https://www.googleapis.com/youtube/v3/videos?part=snippet,statistics&chart=mostPopular&regionCode=KR&videoCategoryId=10&maxResults=10&key={YOUTUBE_API_KEY}"
+    if not YOUTUBE_API_KEY: return [{"error": "API KEY 없음"}]
     try:
-        data = requests.get(url, timeout=10).json()
-        if 'error' in data: return [{"error": data['error'].get('message')}]
-        return [{'rank': i+1, 'title': item['snippet']['title'], 'channelTitle': item['snippet']['channelTitle'], 'url': f"https://www.youtube.com/watch?v={item['id']}", 'thumbnail': item['snippet']['thumbnails'].get('medium', {}).get('url', '')} for i, item in enumerate(data.get('items', []))]
+        data = requests.get(f"https://www.googleapis.com/youtube/v3/videos?part=snippet,statistics&chart=mostPopular&regionCode=KR&videoCategoryId=10&maxResults=10&key={YOUTUBE_API_KEY}", timeout=5).json()
+        return [{'rank': i+1, 'title': item['snippet']['title'], 'url': f"https://www.youtube.com/watch?v={item['id']}"} for i, item in enumerate(data.get('items', []))]
     except Exception as e: return [{"error": str(e)}]
 
 def get_apple_music_trends():
-    url = "https://rss.applemarketingtools.com/api/v2/kr/music/most-played/10/songs.json"
-    try: return [{'rank': i+1, 'title': s['name'], 'artist': s['artistName'], 'image': s['artworkUrl100']} for i, s in enumerate(requests.get(url, headers=BROWSER_HEADERS, timeout=10).json().get('feed', {}).get('results', []))]
+    try: return [{'rank': i+1, 'title': s['name'], 'artist': s['artistName']} for i, s in enumerate(requests.get("https://rss.applemarketingtools.com/api/v2/kr/music/most-played/10/songs.json", headers=BROWSER_HEADERS, timeout=5).json().get('feed', {}).get('results', []))]
     except Exception as e: return [{"error": str(e)}]
 
 def get_apple_podcast_trends():
-    url = "https://rss.applemarketingtools.com/api/v2/kr/podcasts/top/10/podcasts.json"
-    try: return [{'rank': i+1, 'title': p['name'], 'artist': p['artistName'], 'image': p['artworkUrl100']} for i, p in enumerate(requests.get(url, headers=BROWSER_HEADERS, timeout=10).json().get('feed', {}).get('results', []))]
+    try: return [{'rank': i+1, 'title': p['name'], 'artist': p['artistName']} for i, p in enumerate(requests.get("https://rss.applemarketingtools.com/api/v2/kr/podcasts/top/10/podcasts.json", headers=BROWSER_HEADERS, timeout=5).json().get('feed', {}).get('results', []))]
     except Exception as e: return [{"error": str(e)}]
 
-# ==========================================
-# 💻 3. IT & 개발 (GitHub, HackerNews)
-# ==========================================
 def get_github_trends():
     last_week = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
-    url = f"https://api.github.com/search/repositories?q=created:>{last_week}&sort=stars&order=desc&per_page=10"
-    headers = BROWSER_HEADERS.copy()
-    headers['Accept'] = 'application/vnd.github.v3+json'
-    try: return [{'rank': i+1, 'keyword': item.get('full_name', ''), 'description': item.get('description') or '설명 없음', 'url': item.get('html_url', '')} for i, item in enumerate(requests.get(url, headers=headers, timeout=10).json().get('items', []))]
+    try: return [{'rank': i+1, 'keyword': item.get('full_name', ''), 'url': item.get('html_url', '')} for i, item in enumerate(requests.get(f"https://api.github.com/search/repositories?q=created:>{last_week}&sort=stars&order=desc&per_page=10", headers={'Accept': 'application/vnd.github.v3+json', **BROWSER_HEADERS}, timeout=5).json().get('items', []))]
     except Exception as e: return [{"error": str(e)}]
 
 def get_hackernews_trends():
     try:
-        ids = requests.get("https://hacker-news.firebaseio.com/v0/topstories.json", headers=BROWSER_HEADERS, timeout=10).json()[:10]
-        return [{'rank': i+1, 'title': requests.get(f"https://hacker-news.firebaseio.com/v0/item/{sid}.json", headers=BROWSER_HEADERS, timeout=5).json().get('title'), 'url': f"https://news.ycombinator.com/item?id={sid}"} for i, sid in enumerate(ids)]
+        ids = requests.get("https://hacker-news.firebaseio.com/v0/topstories.json", headers=BROWSER_HEADERS, timeout=5).json()[:10]
+        def fetch_item(sid, index):
+            try: return {'rank': index + 1, 'title': requests.get(f"https://hacker-news.firebaseio.com/v0/item/{sid}.json", headers=BROWSER_HEADERS, timeout=5).json().get('title'), 'url': f"https://news.ycombinator.com/item?id={sid}"}
+            except: return {'rank': index + 1, 'title': '불러오기 실패', 'url': '#'}
+        
+        trends = [None] * 10
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as ex:
+            future_to_idx = {ex.submit(fetch_item, sid, i): i for i, sid in enumerate(ids)}
+            for f in concurrent.futures.as_completed(future_to_idx): trends[future_to_idx[f]] = f.result()
+        return trends
     except Exception as e: return [{"error": str(e)}]
 
-# ==========================================
-# 💰 4. 금융 (Upbit, CoinGecko)
-# ==========================================
 def get_upbit_trends():
     try:
-        markets = requests.get("https://api.upbit.com/v1/market/all?isDetails=false", headers=BROWSER_HEADERS, timeout=10).json()
+        markets = requests.get("https://api.upbit.com/v1/market/all?isDetails=false", headers=BROWSER_HEADERS, timeout=5).json()
         krw_markets = [m['market'] for m in markets if m['market'].startswith('KRW-')]
-        tickers = requests.get(f"https://api.upbit.com/v1/ticker?markets={','.join(krw_markets)}", headers=BROWSER_HEADERS, timeout=10).json()
+        tickers = requests.get(f"https://api.upbit.com/v1/ticker?markets={','.join(krw_markets)}", headers=BROWSER_HEADERS, timeout=5).json()
         tickers.sort(key=lambda x: x.get('acc_trade_price_24h', 0), reverse=True)
-        return [{'rank': i+1, 'keyword': t['market'], 'price': f"{t.get('trade_price', 0):,}원", 'url': f"https://upbit.com/exchange?code=CRIX.UPBIT.{t['market']}"} for i, t in enumerate(tickers[:10])]
+        return [{'rank': i+1, 'keyword': t['market'], 'price': f"{t.get('trade_price', 0):,}원"} for i, t in enumerate(tickers[:10])]
     except Exception as e: return [{"error": str(e)}]
 
 def get_coingecko_trends():
-    try: return [{'rank': i+1, 'title': c['item']['name'], 'symbol': c['item']['symbol'], 'image': c['item']['small']} for i, c in enumerate(requests.get("https://api.coingecko.com/api/v3/search/trending", headers=BROWSER_HEADERS, timeout=10).json().get('coins', [])[:10])]
+    try: return [{'rank': i+1, 'title': c['item']['name'], 'symbol': c['item']['symbol']} for i, c in enumerate(requests.get("https://api.coingecko.com/api/v3/search/trending", headers=BROWSER_HEADERS, timeout=5).json().get('coins', [])[:10])]
     except Exception as e: return [{"error": str(e)}]
 
-# ==========================================
-# 🎮 5. 게임 (Steam, 애플 클래식 게임)
-# ==========================================
 def get_steam_trends():
-    try: return [{'rank': i+1, 'title': g.get('name'), 'image': g.get('header_image')} for i, g in enumerate(requests.get("https://store.steampowered.com/api/featuredcategories/?cc=kr&l=korean", headers=BROWSER_HEADERS, timeout=10).json().get('top_sellers', {}).get('items', [])[:10])]
+    try: return [{'rank': i+1, 'title': g.get('name')} for i, g in enumerate(requests.get("https://store.steampowered.com/api/featuredcategories/?cc=kr&l=korean", headers=BROWSER_HEADERS, timeout=5).json().get('top_sellers', {}).get('items', [])[:10])]
     except Exception as e: return [{"error": str(e)}]
 
 def get_apple_games_trends():
-    url = "https://itunes.apple.com/kr/rss/topfreeapplications/limit=10/genre=6014/json"
     try:
-        data = requests.get(url, headers=BROWSER_HEADERS, timeout=10).json()
-        entries = data.get('feed', {}).get('entry', [])
-        if isinstance(entries, dict): entries = [entries]
-        
-        trends = []
-        for i, item in enumerate(entries[:10]):
-            app_url = item.get('id', {}).get('label', '')
-            if not app_url:
-                link_data = item.get('link')
-                if isinstance(link_data, list) and len(link_data) > 0:
-                    app_url = link_data[0].get('attributes', {}).get('href', '')
-                elif isinstance(link_data, dict):
-                    app_url = link_data.get('attributes', {}).get('href', '')
+        entries = requests.get("https://itunes.apple.com/kr/rss/topfreeapplications/limit=10/genre=6014/json", headers=BROWSER_HEADERS, timeout=5).json().get('feed', {}).get('entry', [])
+        return [{'rank': i+1, 'title': item.get('im:name', {}).get('label', '제목 없음')} for i, item in enumerate(entries[:10])]
+    except Exception as e: return [{"error": str(e)}]
 
-            img_data = item.get('im:image')
-            img_url = ''
-            if isinstance(img_data, list) and len(img_data) > 0:
-                img_url = img_data[-1].get('label', '')
-            elif isinstance(img_data, dict):
-                img_url = img_data.get('label', '')
-
-            trends.append({
-                'rank': i+1,
-                'title': item.get('im:name', {}).get('label', '제목 없음'),
-                'artist': item.get('im:artist', {}).get('label', ''),
-                'image': img_url,
-                'url': app_url
-            })
-            
-        return trends
-    except Exception as e: 
-        return [{"error": f"앱스토어 연동 오류: {str(e)}"}]
-
-# ==========================================
-# 🎬 6. 미디어, 도서 & 애니 (KOFIC, 알라딘 공식, AniList 복구)
-# ==========================================
 def get_kofic_trends():
-    if not KOFIC_API_KEY: return [{"error": "KOFIC_API_KEY 설정 필요"}]
-    yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y%m%d')
-    url = f"http://kobis.or.kr/kobisopenapi/webservice/rest/boxoffice/searchDailyBoxOfficeList.json?key={KOFIC_API_KEY}&targetDt={yesterday}"
-    try: return [{'rank': int(m['rank']), 'title': m['movieNm'], 'audiAcc': f"{int(m['audiAcc']):,}명"} for m in requests.get(url, headers=BROWSER_HEADERS, timeout=10).json().get('boxOfficeResult', {}).get('dailyBoxOfficeList', [])[:10]]
+    if not KOFIC_API_KEY: return [{"error": "API KEY 없음"}]
+    try: return [{'rank': int(m['rank']), 'title': m['movieNm']} for m in requests.get(f"http://kobis.or.kr/kobisopenapi/webservice/rest/boxoffice/searchDailyBoxOfficeList.json?key={KOFIC_API_KEY}&targetDt={(datetime.now() - timedelta(days=1)).strftime('%Y%m%d')}", headers=BROWSER_HEADERS, timeout=5).json().get('boxOfficeResult', {}).get('dailyBoxOfficeList', [])[:10]]
     except Exception as e: return [{"error": str(e)}]
 
 def get_aladin_official_trends():
-    if not ALADIN_TTB_KEY: return [{"error": "ALADIN_TTB_KEY 환경변수 설정 필요"}]
-    url = f"http://www.aladin.co.kr/ttb/api/ItemList.aspx?ttbkey={ALADIN_TTB_KEY}&QueryType=Bestseller&MaxResults=10&start=1&SearchTarget=Book&output=js&Version=20131101"
-    try:
-        data = requests.get(url, timeout=10).json()
-        if 'item' not in data: return [{"error": "알라딘 API 응답 실패"}]
-        return [{'rank': i+1, 'title': item.get('title'), 'author': item.get('author', '').split(',')[0], 'image': item.get('cover'), 'url': item.get('link')} for i, item in enumerate(data.get('item', []))]
+    if not ALADIN_TTB_KEY: return [{"error": "API KEY 없음"}]
+    try: return [{'rank': i+1, 'title': item.get('title'), 'author': item.get('author', '').split(',')[0]} for i, item in enumerate(requests.get(f"http://www.aladin.co.kr/ttb/api/ItemList.aspx?ttbkey={ALADIN_TTB_KEY}&QueryType=Bestseller&MaxResults=10&start=1&SearchTarget=Book&output=js&Version=20131101", timeout=5).json().get('item', []))]
     except Exception as e: return [{"error": str(e)}]
 
 def get_anime_trends():
-    query = """query { Page(page: 1, perPage: 10) { media(sort: TRENDING_DESC, type: ANIME) { title { romaji english } coverImage { large } siteUrl } } }"""
-    try:
-        data = requests.post('https://graphql.anilist.co', json={'query': query}, timeout=10).json()
-        return [{
-            'rank': i+1, 
-            'title': m['title'].get('english') or m['title'].get('romaji', '제목 없음'), 
-            'image': m['coverImage'].get('large'), 
-            'url': m['siteUrl']
-        } for i, m in enumerate(data.get('data', {}).get('Page', {}).get('media', []))]
-    except Exception as e: 
-        return [{"error": f"애니리스트 연동 오류: {str(e)}"}]
+    try: return [{'rank': i+1, 'title': m['title'].get('english') or m['title'].get('romaji')} for i, m in enumerate(requests.post('https://graphql.anilist.co', json={'query': "{ Page(page: 1, perPage: 10) { media(sort: TRENDING_DESC, type: ANIME) { title { romaji english } } } }"}, timeout=5).json().get('data', {}).get('Page', {}).get('media', []))]
+    except Exception as e: return [{"error": str(e)}]
 
 # ==========================================
-# 🚀 최종 라우트 맵핑 (병렬 처리 적용)
+# 🚀 라우트: 0.1초 즉시 반환
 # ==========================================
+TASKS = {
+    'data': get_naver_full_trends,
+    'news_google': get_google_news_trends,
+    'news_sbs': get_sbs_news_trends,
+    'youtube_music': get_youtube_music_trends,
+    'music_apple': get_apple_music_trends,
+    'podcast': get_apple_podcast_trends,
+    'github': get_github_trends,
+    'hackernews': get_hackernews_trends,
+    'upbit': get_upbit_trends,
+    'coingecko': get_coingecko_trends,
+    'steam': get_steam_trends,
+    'mobile_game': get_apple_games_trends,
+    'movie': get_kofic_trends,
+    'books': get_aladin_official_trends,
+    'anime': get_anime_trends
+}
+
 @app.route('/')
-def home():
-    return "<h1>Now.ly 백엔드 서버가 쌩쌩하게 잘 돌아가고 있습니다! 🎉</h1><p>프론트엔드 연동을 위한 진짜 주소는 주소창 끝에 <b>/trends</b> 를 붙이셔야 합니다.</p>"
+def home(): return "<h1>Now.ly 백엔드 실행 중!</h1>"
 
 @app.route('/trends', methods=['GET'])
 def get_trends():
-    try:
-        def fetch_naver_full():
-            live_kw = get_realtime_keywords()
-            # 실시간 검색어를 가져오지 못한 경우 기본 키워드로 빠르게 대체
-            if not live_kw or live_kw == DEFAULT_KEYWORDS:
-                return [{"rank": i+1, "keyword": kw} for i, kw in enumerate(DEFAULT_KEYWORDS)]
-                
-            r1 = fetch_naver_trends([{"groupName": kw, "keywords": [kw]} for kw in live_kw[:5]])
-            r2 = fetch_naver_trends([{"groupName": kw, "keywords": [kw]} for kw in live_kw[5:]])
-            all_results = r1.get('results', []) + r2.get('results', [])
-            all_results.sort(key=lambda x: x['data'][-1]['ratio'] if x.get('data') else 0, reverse=True)
-            return [{'rank': i+1, 'keyword': item['title']} for i, item in enumerate(all_results)]
-
-        # 병렬로 실행할 작업 매핑 딕셔너리
-        tasks = {
-            'data': fetch_naver_full,  # 프론트엔드 호환을 위해 'naver' 대신 'data'로 키 값 설정
-            'news_google': get_google_news_trends,
-            'news_sbs': get_sbs_news_trends,
-            'youtube_music': get_youtube_music_trends,
-            'music_apple': get_apple_music_trends,
-            'podcast': get_apple_podcast_trends,
-            'github': get_github_trends,
-            'hackernews': get_hackernews_trends,
-            'upbit': get_upbit_trends,
-            'coingecko': get_coingecko_trends,
-            'steam': get_steam_trends,
-            'mobile_game': get_apple_games_trends,
-            'movie': get_kofic_trends,
-            'books': get_aladin_official_trends,
-            'anime': get_anime_trends
-        }
-
-        results = {'success': True}
-        
-        # 🚀 ThreadPoolExecutor를 사용해 최대 15개 스레드로 동시(병렬) 수집
-        with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
-            future_to_key = {
-                executor.submit(get_cached_data, key, func): key 
-                for key, func in tasks.items()
-            }
-            
-            # 작업이 완료되는 대로 결과를 딕셔너리에 취합
-            for future in concurrent.futures.as_completed(future_to_key):
-                key = future_to_key[future]
-                try:
-                    results[key] = future.result()
-                except Exception as exc:
-                    print(f"[{key}] 예외 발생: {exc}")
-                    results[key] = [{"error": str(exc)}]
-
-        return jsonify(results)
-
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)})
-
-@app.route('/health')
-def health(): return jsonify({'status': 'ok'})
+    # 여기서 각 카테고리별 데이터를 조회하지만, '기다리지 않고' 캐시를 바로 던짐
+    results = {'success': True}
+    for key, func in TASKS.items():
+        results[key] = get_swr_data(key, func)
+    return jsonify(results)
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8080, debug=False)
