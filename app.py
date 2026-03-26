@@ -9,6 +9,7 @@ import requests
 import time
 import concurrent.futures
 import threading
+import csv  # 🔥 CSV 파싱을 위한 모듈 추가
 from datetime import datetime, timedelta
 import xml.etree.ElementTree as ET
 
@@ -23,6 +24,9 @@ NAVER_CLIENT_SECRET = os.environ.get('NAVER_CLIENT_SECRET', '')
 YOUTUBE_API_KEY     = os.environ.get('YOUTUBE_API_KEY', '')
 KOFIC_API_KEY       = os.environ.get('KOFIC_API_KEY', '')
 ALADIN_TTB_KEY      = os.environ.get('ALADIN_TTB_KEY', '')
+
+# 🔥 구글 트렌드 수동 CSV 링크 (질문자님이 만드신 주소)
+GOOGLE_TRENDS_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRVGR2nB57vMAQeGNBOephsXV2A39OxcAt6nZrpro1lm3PNSPO0lyro9Juby8H7AYP_tE1PlYpfyz0V/pub?output=csv"
 
 DEFAULT_KEYWORDS = ["환율", "날씨", "삼성전자", "이재명", "손흥민", "GPT", "아이유", "뉴진스", "비트코인", "넷플릭스"]
 BROWSER_HEADERS = {
@@ -76,6 +80,43 @@ def get_swr_data(key, fetch_func):
 # ==========================================
 # 🔍 API 수집 함수들 (Timeout 5초로 단축, 병렬화)
 # ==========================================
+
+# 🔥 구글 트렌드 CSV 전용 함수 추가
+def get_google_trends_from_csv():
+    try:
+        req = urllib.request.Request(GOOGLE_TRENDS_CSV_URL, headers=BROWSER_HEADERS)
+        response = urllib.request.urlopen(req, timeout=5)
+        lines = [line.decode('utf-8') for line in response.readlines()]
+        reader = csv.reader(lines)
+        trends = []
+        
+        for i, row in enumerate(reader):
+            # 첫 번째 줄(헤더)이거나 빈 줄 건너뛰기
+            if i == 0 or not row or len(row) < 6:
+                continue
+            
+            # 올려주신 공식 CSV 구조에 맞춘 데이터 추출
+            keyword = row[0].strip()
+            search_volume = row[1].strip()
+            raw_url = row[5].strip()
+            
+            # URL 완성 (상대경로를 절대경로로 변경)
+            full_url = raw_url.replace("./explore", "https://trends.google.com/trends/explore")
+            
+            trends.append({
+                'rank': len(trends) + 1,
+                'title': keyword,
+                'volume': search_volume,  # "1천+" 같은 검색량
+                'url': full_url
+            })
+            
+            if len(trends) == 10: 
+                break
+                
+        return trends if trends else [{"error": "스프레드시트 데이터 없음"}]
+    except Exception as e:
+        return [{"error": f"CSV 파싱 실패: {str(e)}"}]
+
 def get_naver_full_trends():
     try:
         found, stop = [], {'기자','뉴스','속보','오늘','지금'}
@@ -190,6 +231,7 @@ def get_anime_trends():
 # ==========================================
 TASKS = {
     'data': get_naver_full_trends,
+    'google_trend': get_google_trends_from_csv,  # 🔥 최종 라우트에 구글 트렌드 연결!
     'news_google': get_google_news_trends,
     'news_sbs': get_sbs_news_trends,
     'youtube_music': get_youtube_music_trends,
