@@ -7,24 +7,18 @@ import os
 import re
 import requests
 import time
+import concurrent.futures  # 🚀 병렬 처리를 위한 모듈 추가 (내장 모듈)
 from datetime import datetime, timedelta
 import xml.etree.ElementTree as ET
 
 app = Flask(__name__)
 
-# CORS: 모든 출처 허용
+# CORS: 모든 출처 허용 (불필요한 after_request 중복 제거)
 CORS(app, resources={r"/*": {
     "origins": "*",
     "allow_headers": ["Content-Type", "Authorization", "Accept"],
     "methods": ["GET", "POST", "OPTIONS"]
 }})
-
-@app.after_request
-def after_request(response):
-    response.headers["Access-Control-Allow-Origin"] = "*"
-    response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, Accept"
-    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
-    return response
 
 # ==========================================
 # 🔐 환경 변수 설정
@@ -47,7 +41,7 @@ BROWSER_HEADERS = {
 }
 
 # ==========================================
-# 🟢 캐시 시스템 (서버 부하 방지)
+# 🟢 개선된 캐시 시스템 (빈 데이터 방어 추가)
 # ==========================================
 CACHE = {}
 CACHE_TTL = 600  # 10분 유지
@@ -62,7 +56,15 @@ def get_cached_data(key, fetch_func, ttl=CACHE_TTL):
     print(f"🔄 [{key}] 데이터 새로 갱신 중...")
     data = fetch_func()
     
-    is_error = isinstance(data, list) and len(data) > 0 and 'error' in data[0]
+    # 💡 개선: 빈 리스트([])이거나 에러 키가 포함된 경우를 더 정확히 캐치
+    is_error = False
+    if isinstance(data, list):
+        if len(data) == 0 or (len(data) > 0 and 'error' in data[0]):
+            is_error = True
+    elif isinstance(data, dict) and 'error' in data:
+        is_error = True
+
+    # 정상 데이터면 10분 캐시, 에러/빈 데이터면 1분 뒤 재시도하도록 설정
     CACHE[key] = {
         'data': data,
         'time': now if not is_error else now - ttl + 60 
@@ -249,10 +251,8 @@ def get_anime_trends():
         return [{"error": f"애니리스트 연동 오류: {str(e)}"}]
 
 # ==========================================
-# 🚀 최종 라우트 맵핑
+# 🚀 최종 라우트 맵핑 (병렬 처리 적용)
 # ==========================================
-
-# ⭐ 새로 추가된 '대문' 라우트 ⭐
 @app.route('/')
 def home():
     return "<h1>Now.ly 백엔드 서버가 쌩쌩하게 잘 돌아가고 있습니다! 🎉</h1><p>프론트엔드 연동을 위한 진짜 주소는 주소창 끝에 <b>/trends</b> 를 붙이셔야 합니다.</p>"
@@ -262,35 +262,55 @@ def get_trends():
     try:
         def fetch_naver_full():
             live_kw = get_realtime_keywords()
+            # 실시간 검색어를 가져오지 못한 경우 기본 키워드로 빠르게 대체
+            if not live_kw or live_kw == DEFAULT_KEYWORDS:
+                return [{"rank": i+1, "keyword": kw} for i, kw in enumerate(DEFAULT_KEYWORDS)]
+                
             r1 = fetch_naver_trends([{"groupName": kw, "keywords": [kw]} for kw in live_kw[:5]])
             r2 = fetch_naver_trends([{"groupName": kw, "keywords": [kw]} for kw in live_kw[5:]])
             all_results = r1.get('results', []) + r2.get('results', [])
             all_results.sort(key=lambda x: x['data'][-1]['ratio'] if x.get('data') else 0, reverse=True)
             return [{'rank': i+1, 'keyword': item['title']} for i, item in enumerate(all_results)]
 
-        return jsonify({
-            'success': True,
-            'data':          get_cached_data('naver', fetch_naver_full),
-            'news_google':   get_cached_data('news_google', get_google_news_trends),
-            'news_sbs':      get_cached_data('news_sbs', get_sbs_news_trends),
+        # 병렬로 실행할 작업 매핑 딕셔너리
+        tasks = {
+            'data': fetch_naver_full,  # 프론트엔드 호환을 위해 'naver' 대신 'data'로 키 값 설정
+            'news_google': get_google_news_trends,
+            'news_sbs': get_sbs_news_trends,
+            'youtube_music': get_youtube_music_trends,
+            'music_apple': get_apple_music_trends,
+            'podcast': get_apple_podcast_trends,
+            'github': get_github_trends,
+            'hackernews': get_hackernews_trends,
+            'upbit': get_upbit_trends,
+            'coingecko': get_coingecko_trends,
+            'steam': get_steam_trends,
+            'mobile_game': get_apple_games_trends,
+            'movie': get_kofic_trends,
+            'books': get_aladin_official_trends,
+            'anime': get_anime_trends
+        }
+
+        results = {'success': True}
+        
+        # 🚀 ThreadPoolExecutor를 사용해 최대 15개 스레드로 동시(병렬) 수집
+        with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
+            future_to_key = {
+                executor.submit(get_cached_data, key, func): key 
+                for key, func in tasks.items()
+            }
             
-            'youtube_music': get_cached_data('youtube_music', get_youtube_music_trends),
-            'music_apple':   get_cached_data('music_apple', get_apple_music_trends),
-            'podcast':       get_cached_data('podcast', get_apple_podcast_trends),
-            
-            'github':        get_cached_data('github', get_github_trends),
-            'hackernews':    get_cached_data('hackernews', get_hackernews_trends),
-            
-            'upbit':         get_cached_data('upbit', get_upbit_trends),
-            'coingecko':     get_cached_data('coingecko', get_coingecko_trends),
-            
-            'steam':         get_cached_data('steam', get_steam_trends),
-            'mobile_game':   get_cached_data('apple_game', get_apple_games_trends),
-            
-            'movie':         get_cached_data('kofic', get_kofic_trends),
-            'books':         get_cached_data('books_official', get_aladin_official_trends),
-            'anime':         get_cached_data('anime', get_anime_trends)
-        })
+            # 작업이 완료되는 대로 결과를 딕셔너리에 취합
+            for future in concurrent.futures.as_completed(future_to_key):
+                key = future_to_key[future]
+                try:
+                    results[key] = future.result()
+                except Exception as exc:
+                    print(f"[{key}] 예외 발생: {exc}")
+                    results[key] = [{"error": str(exc)}]
+
+        return jsonify(results)
+
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
 
