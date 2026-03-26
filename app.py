@@ -52,9 +52,13 @@ def background_fetch_task(key, fetch_func):
             if key in CACHE:
                 CACHE[key]['fetching'] = False
                 CACHE[key]['time'] = time.time() - CACHE_TTL + 60 # 에러 시 1분 뒤 재시도
+                # 🔥 버그 수정: 에러가 나도 캐시에 에러 데이터를 넣어서 프론트엔드가 무한 로딩에 안 빠지게 함!
+                CACHE[key]['data'] = data 
     except Exception as e:
         print(f"[{key}] 갱신 실패: {e}")
-        if key in CACHE: CACHE[key]['fetching'] = False
+        if key in CACHE: 
+            CACHE[key]['fetching'] = False
+            CACHE[key]['data'] = [{"error": str(e)}]
 
 def get_swr_data(key, fetch_func):
     """캐시가 있으면 즉시 반환하고, 낡았으면 뒤에서 몰래 갱신시킴"""
@@ -81,7 +85,7 @@ def get_swr_data(key, fetch_func):
 # 🔍 API 수집 함수들 (Timeout 5초로 단축, 병렬화)
 # ==========================================
 
-# 🔥 구글 트렌드 CSV 전용 함수 추가
+# 🔥 구글 트렌드 CSV 전용 파서 로직 강력하게 업그레이드
 def get_google_trends_from_csv():
     try:
         req = urllib.request.Request(GOOGLE_TRENDS_CSV_URL, headers=BROWSER_HEADERS)
@@ -91,22 +95,33 @@ def get_google_trends_from_csv():
         trends = []
         
         for i, row in enumerate(reader):
-            # 첫 번째 줄(헤더)이거나 빈 줄 건너뛰기
-            if i == 0 or not row or len(row) < 6:
+            # 1. 헤더(첫 줄)이거나 아예 빈 줄이면 건너뛰기
+            if i == 0 or not row:
                 continue
             
-            # 올려주신 공식 CSV 구조에 맞춘 데이터 추출
-            keyword = row[0].strip()
-            search_volume = row[1].strip()
-            raw_url = row[5].strip()
+            # 2. A열에 통째로 뭉쳐서 복붙된 경우 강제로 쪼개기 (복붙 실수 방어)
+            if len(row) == 1 and ',' in row[0]:
+                row = row[0].split(',')
             
-            # URL 완성 (상대경로를 절대경로로 변경)
-            full_url = raw_url.replace("./explore", "https://trends.google.com/trends/explore")
+            # 그래도 데이터가 아예 없으면 패스
+            if len(row) == 0:
+                continue
+                
+            # 3. 데이터 추출 (6칸이 안 돼도 무조건 뽑아냄)
+            keyword = row[0].strip().replace('"', '')
+            search_volume = row[1].strip().replace('"', '') if len(row) > 1 else ""
+            
+            # 4. 링크 조립 (CSV에 링크가 잘려있으면 서버가 직접 URL을 제조함)
+            raw_url = row[5].strip() if len(row) > 5 else ""
+            if raw_url and raw_url.startswith("./explore"):
+                full_url = raw_url.replace("./explore", "https://trends.google.com/trends/explore")
+            else:
+                full_url = f"https://trends.google.com/trends/explore?q={urllib.parse.quote(keyword)}&geo=KR"
             
             trends.append({
                 'rank': len(trends) + 1,
                 'title': keyword,
-                'volume': search_volume,  # "1천+" 같은 검색량
+                'volume': search_volume,
                 'url': full_url
             })
             
