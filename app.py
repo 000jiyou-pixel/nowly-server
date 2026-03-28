@@ -38,7 +38,8 @@ BROWSER_HEADERS = {
 # ==========================================
 CACHE = {}
 CACHE_TTL = 300  # 5분마다 백그라운드 갱신
-executor = concurrent.futures.ThreadPoolExecutor(max_workers=20)
+# 🔥 서버 과부하 방지: 20 -> 5로 대폭 감소
+executor = concurrent.futures.ThreadPoolExecutor(max_workers=5)
 
 def background_fetch_task(key, fetch_func):
     """사용자 모르게 뒤에서 데이터를 갱신하는 암살자 함수"""
@@ -198,7 +199,8 @@ def get_hackernews_trends():
             except: return {'rank': index + 1, 'title': '불러오기 실패', 'url': '#'}
         
         trends = [None] * 10
-        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as ex:
+        # 🔥 서버 과부하 방지: 10 -> 3으로 대폭 감소
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as ex:
             future_to_idx = {ex.submit(fetch_item, sid, i): i for i, sid in enumerate(ids)}
             for f in concurrent.futures.as_completed(future_to_idx): trends[future_to_idx[f]] = f.result()
         return trends
